@@ -132,7 +132,7 @@ where
                         (None, None) => None,
                         (Some(x), None) => Some(x),
                         (None, Some(x)) => Some(x),
-                        (Some(x), Some(y)) => (&x * &y).ok()
+                        (Some(x), Some(y)) => x.mul(&y).ok()
                     })?;
                 match term {
                     Some(t) => Some(t.scale(*coef)),
@@ -143,7 +143,7 @@ where
                 (None, None) => None,
                 (Some(acc), None) => Some(acc),
                 (None, Some(term)) => Some(term),
-                (Some(acc), Some(term)) => (&acc + &term).ok(),
+                (Some(acc), Some(term)) => acc.add(&term).ok(),
             });
         res.ok_or(())?.ok_or(())
 
@@ -459,9 +459,9 @@ where
                 for (bit, _) in bit_view.iter().zip(0..bitfinal + 1) {
                     let b = bit.to_owned();
                     if *b {
-                        result = (&result * &last_pow)?;
+                        result = result.mul(&last_pow)?;
                     }
-                    last_pow = (&last_pow * &last_pow)?;
+                    last_pow = last_pow.mul(&last_pow)?;
                 }
                 Ok(result)
             }
@@ -476,32 +476,16 @@ where
         let coefficients = ArrayD::<S>::zeros(vec![1; dimension].as_slice());
         Self { coefficients }
     }
-}
-
-impl<S> Mul for &Polynomial<S>
-where
-    S: Zero + One + Mul<Output = S> + Copy + Add + ScalarOperand,
-{
-    type Output = Result<Polynomial<S>, ()>;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        let new_shape = Polynomial::<S>::get_shape_mul(&self.shape(), &rhs.shape())?;
-        let mut result = ArrayD::<S>::zeros(new_shape);
-        self.mul_no_alloc(&rhs, &mut result);
-        Ok(Polynomial::new(result))
-    }
-}
-
-impl<S> Add for &Polynomial<S>
-where
-    S: Zero + One + Copy + Add + ScalarOperand,
-{
-    type Output = Result<Polynomial<S>, ()>;
-
-    fn add(self, rhs: Self) -> Self::Output {
+    pub fn add(&self, rhs: &Self) -> Result<Self, ()> {
         let new_shape = Polynomial::<S>::get_shape_add(&self.shape(), &rhs.shape())?;
         let mut result = ArrayD::<S>::zeros(new_shape);
         self.add_no_alloc(&rhs, &mut result);
+        Ok(Polynomial::new(result))
+    }
+    pub fn mul(&self, rhs: &Self) -> Result<Self, ()> {
+        let new_shape = Polynomial::<S>::get_shape_mul(&self.shape(), &rhs.shape())?;
+        let mut result = ArrayD::<S>::zeros(new_shape);
+        self.mul_no_alloc(&rhs, &mut result);
         Ok(Polynomial::new(result))
     }
 }
@@ -534,7 +518,7 @@ mod test {
         array[[1]] = 2.0;
         array[[2]] = 3.0;
         let foo = Polynomial::<f64>::new(array);
-        let actual = &foo * &foo;
+        let actual = foo.clone().mul(&foo);
         let expected = {
             let mut coefs = ArrayD::zeros(IxDyn(&[5]));
             coefs[[0]] = 1.0;
@@ -562,7 +546,7 @@ mod test {
             array[[2]] = 4.0;
             Polynomial::<f64>::new(array)
         };
-        let actual = &foo * &bar;
+        let actual = foo.mul(&bar);
         let expected = {
             let mut coefs = ArrayD::zeros(IxDyn(&[5]));
             coefs[[0]] = 2.0;
@@ -590,7 +574,7 @@ mod test {
             array[[2]] = 4.0;
             Polynomial::<f64>::new(array)
         };
-        let actual = &foo + &bar;
+        let actual = foo.add(&bar);
         let expected = {
             let mut coefs = ArrayD::zeros(IxDyn(&[3]));
             coefs[[0]] = 3.0;
@@ -616,7 +600,8 @@ mod test {
             array[[2]] = 4.0;
             Polynomial::<f64>::new(array)
         };
-        assert_eq!(&foo * &bar, &bar * &foo);
+
+        assert_eq!(foo.mul(&bar), bar.mul(&foo));
     }
     #[test]
     fn make_eval_poly_2d() {
@@ -651,7 +636,7 @@ mod test {
             coefs[[1, 1]] = 4.0;
             Polynomial::<f64>::new(coefs)
         };
-        let actual = (&term * &term).unwrap();
+        let actual = (term.mul(&term)).unwrap();
         let expected = {
             let mut coefs = ArrayD::zeros(IxDyn(&[3, 3]));
             coefs[[0, 0]] = 1.0;
@@ -884,16 +869,16 @@ mod test {
             Polynomial::<f64>::new(coefs)
         };
         let actual = term.pow(2).unwrap();
-        let expected = (&term * &term).unwrap();
+        let expected = (term.mul(&term)).unwrap();
         assert_eq!(expected, actual);
         let actual = term.pow(3).unwrap();
-        let expected = (&term * &expected).unwrap();
+        let expected = (term.mul(&expected)).unwrap();
         assert_eq!(expected, actual);
         let actual = term.pow(4).unwrap();
-        let expected = (&term * &expected).unwrap();
+        let expected = (term.mul(&expected)).unwrap();
         assert_eq!(expected, actual);
         let actual = term.pow(5).unwrap();
-        let expected = (&term * &expected).unwrap();
+        let expected = (term.mul(&expected)).unwrap();
         assert_eq!(expected, actual);
     }
     #[test]
