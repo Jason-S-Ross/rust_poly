@@ -1,14 +1,37 @@
 use ahash::AHashSet;
 use bitvec::prelude::*;
 use ndarray::{
-    Array, ArrayD, ArrayView, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex, SliceArg,
-    SliceInfoElem, ScalarOperand
+    Array, ArrayD, ArrayView, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex, ScalarOperand,
+    SliceArg, SliceInfoElem,
 };
 use num_traits::cast::NumCast;
 use num_traits::identities::{One, Zero};
-use std::ops::{Add, Div, Mul};
+use std::ops::{Add, Div, Mul, Sub};
 
+#[derive(Debug)]
+pub enum PolynomialError {
+    Composition,
+    Evaluation,
+    Other(String),
+}
 
+impl std::fmt::Display for PolynomialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PolynomialError::Composition => {
+                write!(f, "Composed polynomials of incompatible dimension")
+            }
+            PolynomialError::Evaluation => {
+                write!(f, "Tried to evaluate argument of incompatible dimension")
+            }
+            PolynomialError::Other(s) => write!(
+                f,
+                "{}",
+                format!("Something went wrong. Error message: {}", s)
+            ),
+        }
+    }
+}
 
 /// Permutations of N things taken k at a time, i.e., k-permutations of N
 fn perm(k: usize, n: usize) -> usize {
@@ -24,7 +47,7 @@ fn perm(k: usize, n: usize) -> usize {
 }
 
 /// Reasonably efficient (?) exponentiation for arbitrary types
-fn pow<T>(val: T, pow: usize) -> T
+pub fn pow<T>(val: T, pow: usize) -> T
 where
     T: Mul<Output = T> + Copy + One,
 {
@@ -60,7 +83,7 @@ pub struct Polynomial<S> {
 
 impl<S> Polynomial<S>
 where
-    S: Add<Output = S> + Mul<Output = S> + ScalarOperand + Copy + Zero + One,
+    S: Add<Output = S> + Mul<Output = S> + Sub<Output = S> + ScalarOperand + Copy + Zero + One,
 {
     pub fn new(coefficients: ArrayD<S>) -> Self {
         Polynomial { coefficients }
@@ -68,11 +91,14 @@ where
     pub fn shape(&self) -> Vec<usize> {
         self.coefficients.shape().iter().cloned().collect()
     }
-    pub fn scale(&self, scalar: S) -> Self {
-        Self::new(self.coefficients.clone() * scalar)
+    pub fn dimension(&self) -> usize {
+        self.coefficients.shape().len()
+    }
+    pub fn scale(&self, scalar: S) -> Result<Self, PolynomialError> {
+        Ok(Self::new(self.coefficients.clone() * scalar))
     }
     // Evaluates coefficients generically
-    fn polyval<D>(coefs: &ArrayView<S, D>, values: &[S]) -> Result<S, ()>
+    fn polyval<D>(coefs: &ArrayView<S, D>, values: &[S]) -> Result<S, PolynomialError>
     where
         D: Dimension,
         Dim<IxDynImpl>: NdIndex<D>,
@@ -107,16 +133,23 @@ where
                 (None, Some(term)) => Some(term),
                 (Some(acc), Some(term)) => Some(acc + term),
             });
-        res.ok_or(())?.ok_or(())
+        res.ok_or(PolynomialError::Other("Inner none on polyval".to_string()))?
+            .ok_or(PolynomialError::Other("Outer none on polyval".to_string()))
     }
 
     /// Composes one polynomial with another
-    pub fn compose(&self, values: &[&Self]) -> Result<Self, ()> {
-        let dimension = values.iter().next().ok_or(())?.shape().len();
+    pub fn compose_scalar(&self, values: &[&Self]) -> Result<Self, PolynomialError> {
+        let dimension = values
+            .iter()
+            .next()
+            .ok_or(PolynomialError::Composition)?
+            .shape()
+            .len();
         if values.iter().any(|x| x.shape().len() != dimension) {
-            return Err(());
+            return Err(PolynomialError::Composition);
         }
-        let res = self.coefficients
+        let res = self
+            .coefficients
             .indexed_iter()
             .map(|(index, coef)| {
                 let term = index
@@ -132,11 +165,11 @@ where
                         (None, None) => None,
                         (Some(x), None) => Some(x),
                         (None, Some(x)) => Some(x),
-                        (Some(x), Some(y)) => x.mul(&y).ok()
+                        (Some(x), Some(y)) => x.mul(&y).ok(),
                     })?;
                 match term {
-                    Some(t) => Some(t.scale(*coef)),
-                    None => Some(Self::one(dimension).scale(*coef)),
+                    Some(t) => t.scale(*coef).ok(),
+                    None => Self::one(dimension).scale(*coef).ok(),
                 }
             })
             .reduce(|acc, term| match (acc, term) {
@@ -145,14 +178,65 @@ where
                 (None, Some(term)) => Some(term),
                 (Some(acc), Some(term)) => acc.add(&term).ok(),
             });
-        res.ok_or(())?.ok_or(())
-
+        res.ok_or(PolynomialError::Other(
+            "Inner none on compose scalar".to_string(),
+        ))?
+        .ok_or(PolynomialError::Other(
+            "Outer none on compose scalar".to_string(),
+        ))
+    }
+    /// Composes one polynomial with another
+    pub fn compose<D>(
+        &self,
+        values: &ArrayView<&Self, D>,
+    ) -> Result<Array<Self, Dim<IxDynImpl>>, PolynomialError>
+    where
+        D: Dimension,
+        Dim<IxDynImpl>: NdIndex<D>,
+        [SliceInfoElem]: SliceArg<D>,
+    {
+        let dimension = values
+            .iter()
+            .next()
+            .ok_or(PolynomialError::Composition)?
+            .coefficients
+            .shape()
+            .len();
+        if values
+            .iter()
+            .any(|x| x.coefficients.shape().len() != dimension)
+        {
+            return Err(PolynomialError::Composition);
+        }
+        let val_shape: Vec<_> = values.shape().iter().cloned().collect();
+        let outputshape = Self::get_shape_eval(&self.shape(), &val_shape)?;
+        let mut output = Array::<Self, _>::from_elem(outputshape.as_slice(), Self::zero(dimension));
+        for (result_index, result_val) in output.indexed_iter_mut() {
+            let slice_positions: Vec<_> = result_index
+                .as_array_view()
+                .iter()
+                .map(|x| SliceInfoElem::Index(*x as isize))
+                .chain([SliceInfoElem::Slice {
+                    start: 0,
+                    end: None,
+                    step: 1,
+                }])
+                .collect();
+            let some_vals = values.slice(slice_positions.as_slice());
+            let slc = some_vals.as_slice().ok_or(PolynomialError::Composition)?;
+            let res = self.compose_scalar(slc);
+            *result_val = res?;
+        }
+        Ok(output)
     }
     /// Evaluate a polynomial on an array of scalars.
-    pub fn eval_scalar(&self, values: &[S]) -> Result<S, ()> {
+    pub fn eval_scalar(&self, values: &[S]) -> Result<S, PolynomialError> {
         Polynomial::<S>::polyval(&self.coefficients.view(), values)
     }
-    pub fn eval<'a, D>(&'a self, values: &ArrayView<S, D>) -> Result<Array<S, Dim<IxDynImpl>>, ()>
+    pub fn eval<'a, D>(
+        &'a self,
+        values: &ArrayView<S, D>,
+    ) -> Result<Array<S, Dim<IxDynImpl>>, PolynomialError>
     where
         D: Dimension,
         Dim<IxDynImpl>: NdIndex<D>,
@@ -160,7 +244,8 @@ where
     {
         let val_shape: Vec<_> = values.shape().iter().cloned().collect();
         let outputshape = Polynomial::<S>::get_shape_eval(&self.shape(), &val_shape);
-        let mut output = Array::<S, _>::ones(outputshape?);
+        // TODO should this be zeros or ones
+        let mut output = Array::<S, _>::zeros(outputshape?);
         self.eval_no_alloc(values, &mut output)?;
         Ok(output)
     }
@@ -169,7 +254,7 @@ where
         &self,
         values: &'a ArrayView<S, D>,
         output: &'a mut Array<S, Dim<IxDynImpl>>,
-    ) -> Result<(), ()>
+    ) -> Result<(), PolynomialError>
     where
         D: Dimension,
         Dim<IxDynImpl>: NdIndex<D>,
@@ -196,13 +281,13 @@ where
     pub fn get_shape_partial(
         coef_shape: &[usize],
         target_indices: &[usize],
-    ) -> Result<Vec<usize>, ()> {
+    ) -> Result<Vec<usize>, PolynomialError> {
         if target_indices.iter().any(|x| x >= &coef_shape.len()) {
-            return Err(());
+            return Err(PolynomialError::Evaluation);
         }
         let mut unique: AHashSet<usize> = AHashSet::with_capacity(target_indices.len());
         if !target_indices.iter().all(|x| unique.insert(*x)) {
-            return Err(());
+            return Err(PolynomialError::Evaluation);
         }
         Ok(coef_shape
             .iter()
@@ -211,17 +296,23 @@ where
             .collect())
     }
     /// Gets the shape of the result of evaluating a polynomial
-    pub fn get_shape_eval(coef_shape: &[usize], val_shape: &[usize]) -> Result<Vec<usize>, ()> {
+    pub fn get_shape_eval(
+        coef_shape: &[usize],
+        val_shape: &[usize],
+    ) -> Result<Vec<usize>, PolynomialError> {
         if val_shape[val_shape.len() - 1] != coef_shape.len() {
-            return Err(());
+            return Err(PolynomialError::Evaluation);
         }
         Ok(val_shape[..val_shape.len() - 1].to_vec())
     }
 
     /// Gets the shape of the result of a multiplication operation
-    pub fn get_shape_mul(left_shape: &[usize], right_shape: &[usize]) -> Result<Vec<usize>, ()> {
+    pub fn get_shape_mul(
+        left_shape: &[usize],
+        right_shape: &[usize],
+    ) -> Result<Vec<usize>, PolynomialError> {
         if left_shape.len() != right_shape.len() {
-            return Err(());
+            return Err(PolynomialError::Composition);
         }
         let new_shape: Vec<_> = left_shape
             .iter()
@@ -230,13 +321,13 @@ where
             .collect();
         Ok(new_shape)
     }
-    pub fn get_shape_pow(shape: &[usize], exponent: usize) -> Result<Vec<usize>, ()> {
-        let one = | | {vec![1; shape.len()]};
+    pub fn get_shape_pow(shape: &[usize], exponent: usize) -> Result<Vec<usize>, PolynomialError> {
+        let one = || vec![1; shape.len()];
         if exponent == 0 {
             return Ok(one());
         }
         if exponent == 1 {
-            return Ok(shape.to_vec())
+            return Ok(shape.to_vec());
         }
         let mut result = one();
         let mut last_pow = shape.to_vec();
@@ -247,9 +338,11 @@ where
                 for (bit, _) in bit_view.iter().zip(0..bitfinal + 1) {
                     let b = bit.to_owned();
                     if *b {
-                        result = Polynomial::<S>::get_shape_mul(result.as_slice(), last_pow.as_slice())?;
+                        result =
+                            Polynomial::<S>::get_shape_mul(result.as_slice(), last_pow.as_slice())?;
                     }
-                    last_pow = Polynomial::<S>::get_shape_mul(last_pow.as_slice(), last_pow.as_slice())?;
+                    last_pow =
+                        Polynomial::<S>::get_shape_mul(last_pow.as_slice(), last_pow.as_slice())?;
                 }
                 Ok(result)
             }
@@ -257,9 +350,12 @@ where
         }
     }
     /// Gets the shape of the result of an addition operation
-    pub fn get_shape_add(left_shape: &[usize], right_shape: &[usize]) -> Result<Vec<usize>, ()> {
+    pub fn get_shape_add(
+        left_shape: &[usize],
+        right_shape: &[usize],
+    ) -> Result<Vec<usize>, PolynomialError> {
         if left_shape.len() != right_shape.len() {
-            return Err(());
+            return Err(PolynomialError::Composition);
         }
         let new_shape: Vec<_> = left_shape
             .iter()
@@ -269,9 +365,9 @@ where
         Ok(new_shape)
     }
     /// Gets the shape of the result of an integral operation
-    pub fn get_shape_integ(shape: &[usize], arg: &[usize]) -> Result<Vec<usize>, ()> {
+    pub fn get_shape_integ(shape: &[usize], arg: &[usize]) -> Result<Vec<usize>, PolynomialError> {
         if shape.len() != arg.len() {
-            return Err(());
+            return Err(PolynomialError::Composition);
         }
         let new_shape: Vec<_> = shape
             .iter()
@@ -280,10 +376,33 @@ where
             .collect();
         Ok(new_shape)
     }
-    /// Gets the shape of the result of a derivative operation
-    pub fn get_shape_deriv(shape: &[usize], arg: &[usize]) -> Result<Vec<usize>, ()> {
+    /// Gets the shape of the result of a generalized integral/derivative
+    /// Negative values in arg indicate integration
+    pub fn get_shape_deriv_integ(
+        shape: &[usize],
+        arg: &[isize],
+    ) -> Result<Vec<usize>, PolynomialError> {
         if shape.len() != arg.len() {
-            return Err(());
+            return Err(PolynomialError::Composition);
+        }
+        let new_shape: Vec<_> = shape
+            .iter()
+            .zip(arg.iter())
+            .map(|(left, right)| {
+                let v = *left as isize - *right;
+                if v < 0 {
+                    0
+                } else {
+                    v as usize
+                }
+            })
+            .collect();
+        Ok(new_shape)
+    }
+    /// Gets the shape of the result of a derivative operation
+    pub fn get_shape_deriv(shape: &[usize], arg: &[usize]) -> Result<Vec<usize>, PolynomialError> {
+        if shape.len() != arg.len() {
+            return Err(PolynomialError::Composition);
         }
         let new_shape: Vec<_> = shape
             .iter()
@@ -293,9 +412,21 @@ where
         Ok(new_shape)
     }
     /// Panics on out-of-bounds
-    pub fn deriv_no_alloc(&self, arg: &[usize], output: &mut ArrayD<S>) -> Result<(), ()>
+    pub fn deriv(&self, arg: &[usize]) -> Result<Self, PolynomialError>
     where
-        S: NumCast + std::fmt::Debug,
+        S: NumCast,
+    {
+        let arg: Vec<_> = arg.iter().map(|x| *x as isize).collect();
+        self.deriv_integ(&arg.as_slice())
+    }
+    /// Panics on out-of-bounds
+    pub fn deriv_integ_no_alloc(
+        &self,
+        arg: &[isize],
+        output: &mut ArrayD<S>,
+    ) -> Result<(), PolynomialError>
+    where
+        S: NumCast,
     {
         let index_size = self.shape().len();
         for (ref index, _val) in self.coefficients.indexed_iter() {
@@ -305,9 +436,17 @@ where
                 .as_array_view()
                 .iter()
                 .zip(arg.iter())
-                .map(|(index, arg)| perm(*index, *arg))
+                .map(|(index, arg)| {
+                    if *arg > 0 {
+                        perm(*index, *arg as usize) as f64
+                    } else if *arg == 0 {
+                        1.0
+                    } else {
+                        1.0 / (perm(*index + (*arg).abs() as usize, (*arg).abs() as usize) as f64)
+                    }
+                })
                 .reduce(|prod, val| prod * val)
-                .unwrap_or(1); // TODO Check if 1 is the right case here
+                .unwrap_or(1.0); // TODO Check if 1 is the right case here
             let new_index: Vec<_> = index
                 .as_array_view()
                 .iter()
@@ -315,35 +454,46 @@ where
                 .map_while(|(left, right)| {
                     // Use map_while and checked_sub so that if the index is negative,
                     // we ignore it
-                    left.checked_sub(*right)
+                    let val = *left as isize - *right;
+                    if val < 0 {
+                        None
+                    } else {
+                        Some(val as usize)
+                    }
                 })
                 .collect();
             if new_index.len() != index_size {
                 // True if any of the indices underflowed
                 continue;
             }
-            output[new_index.as_slice()] =
-                self.coefficients[index] * <S as NumCast>::from(factor).ok_or(())?;
+            output[new_index.as_slice()] = self.coefficients[index]
+                * <S as NumCast>::from(factor).ok_or(PolynomialError::Other(
+                    "Couldn't cast factor as scalar".to_string(),
+                ))?;
         }
         Ok(())
     }
-    pub fn deriv(&self, arg: &[usize]) -> Result<Self, ()>
+    pub fn deriv_integ(&self, arg: &[isize]) -> Result<Self, PolynomialError>
     where
-        S: NumCast + std::fmt::Debug,
+        S: NumCast,
     {
-        let new_shape = Polynomial::<S>::get_shape_deriv(&self.shape(), &arg)?;
+        let new_shape = Self::get_shape_deriv_integ(&self.shape(), &arg)?;
         let mut result = ArrayD::<S>::zeros(new_shape);
-        self.deriv_no_alloc(arg, &mut result).or(Err(()))?;
-        Ok(Polynomial::new(result))
+        self.deriv_integ_no_alloc(arg, &mut result)
+            .or(Err(PolynomialError::Other(
+                "Something went wrong trying to integrate after allocation".to_string(),
+            )))?;
+        Ok(Self::new(result))
     }
     /// Partial evaluation on a subset of axes.
-    pub fn partial(&self, target_indices: &[usize], target_vals: &[S]) -> Result<Self, ()>
-    where
-        S: std::fmt::Debug,
-    {
+    pub fn partial(
+        &self,
+        target_indices: &[usize],
+        target_vals: &[S],
+    ) -> Result<Self, PolynomialError> {
         let shape = Polynomial::<S>::get_shape_partial(&self.shape(), target_indices)?;
         if target_indices.len() != target_vals.len() {
-            return Err(());
+            return Err(PolynomialError::Evaluation);
         }
         let target_vals = {
             let mut vals: Vec<_> = target_vals.iter().enumerate().collect();
@@ -378,40 +528,12 @@ where
         }
         Ok(Polynomial::new(coefs))
     }
-    /// Panics on out-of-bounds
-    pub fn integ_no_alloc(&self, arg: &[usize], output: &mut ArrayD<S>) -> Result<(), ()>
-    where
-        S: NumCast + Div<Output = S> + std::fmt::Debug,
-    {
-        for (ref index, _val) in self.coefficients.indexed_iter() {
-            let factor = index
-                .clone()
-                .into_dimension()
-                .as_array_view()
-                .iter()
-                .zip(arg.iter())
-                .map(|(index, arg)| perm(*index + *arg, *arg))
-                .reduce(|prod, val| prod * val)
-                .unwrap_or(1); // TODO Check if 1 is the right case here
-            let new_index: Vec<_> = index
-                .as_array_view()
-                .iter()
-                .zip(arg.iter())
-                .map(|(left, right)| *left + *right)
-                .collect();
-            output[new_index.as_slice()] =
-                self.coefficients[index] / <S as NumCast>::from(factor).ok_or(())?;
-        }
-        Ok(())
-    }
-    pub fn integ(&self, arg: &[usize]) -> Result<Self, ()>
+    pub fn integ(&self, arg: &[usize]) -> Result<Self, PolynomialError>
     where
         S: NumCast + std::fmt::Debug + Div<Output = S>,
     {
-        let new_shape = Polynomial::<S>::get_shape_integ(&self.shape(), &arg)?;
-        let mut result = ArrayD::<S>::zeros(new_shape);
-        self.integ_no_alloc(arg, &mut result).or(Err(()))?;
-        Ok(Polynomial::new(result))
+        let arg: Vec<_> = arg.iter().map(|x| -(*x as isize)).collect();
+        self.deriv_integ(&arg.as_slice())
     }
 
     /// Adds two polynomials without allocating space for either. Panics on
@@ -422,6 +544,14 @@ where
         }
         for (ref index, val) in other.coefficients.indexed_iter() {
             output[index] = output[index] + *val;
+        }
+    }
+    pub fn sub_no_alloc(&self, other: &Self, output: &mut ArrayD<S>) {
+        for (ref index, val) in self.coefficients.indexed_iter() {
+            output[index] = output[index] - *val;
+        }
+        for (ref index, val) in other.coefficients.indexed_iter() {
+            output[index] = output[index] - *val;
         }
     }
     /// Multiplies two polynomials without allocating space for either. Panics
@@ -442,7 +572,7 @@ where
             }
         }
     }
-    pub fn pow(&self, exp: usize) -> Result<Self, ()> {
+    pub fn pow(&self, exp: usize) -> Result<Self, PolynomialError> {
         let dimension = self.shape().len();
         if exp == 0 {
             return Ok(Self::one(dimension));
@@ -465,7 +595,9 @@ where
                 }
                 Ok(result)
             }
-            None => Err(())
+            None => Err(PolynomialError::Other(
+                "Somehow there was no last bit in pow".to_string(),
+            )),
         }
     }
     pub fn one(dimension: usize) -> Self {
@@ -476,13 +608,19 @@ where
         let coefficients = ArrayD::<S>::zeros(vec![1; dimension].as_slice());
         Self { coefficients }
     }
-    pub fn add(&self, rhs: &Self) -> Result<Self, ()> {
+    pub fn add(&self, rhs: &Self) -> Result<Self, PolynomialError> {
         let new_shape = Polynomial::<S>::get_shape_add(&self.shape(), &rhs.shape())?;
         let mut result = ArrayD::<S>::zeros(new_shape);
         self.add_no_alloc(&rhs, &mut result);
         Ok(Polynomial::new(result))
     }
-    pub fn mul(&self, rhs: &Self) -> Result<Self, ()> {
+    pub fn sub(&self, rhs: &Self) -> Result<Self, PolynomialError> {
+        let new_shape = Polynomial::<S>::get_shape_add(&self.shape(), &rhs.shape())?;
+        let mut result = ArrayD::<S>::zeros(new_shape);
+        self.sub_no_alloc(&rhs, &mut result);
+        Ok(Polynomial::new(result))
+    }
+    pub fn mul(&self, rhs: &Self) -> Result<Self, PolynomialError> {
         let new_shape = Polynomial::<S>::get_shape_mul(&self.shape(), &rhs.shape())?;
         let mut result = ArrayD::<S>::zeros(new_shape);
         self.mul_no_alloc(&rhs, &mut result);
@@ -491,6 +629,7 @@ where
 }
 
 #[cfg(test)]
+
 mod test {
     use super::*;
 
@@ -501,12 +640,12 @@ mod test {
     }
     #[test]
     fn make_eval_poly_1d() {
-        let mut array = ArrayD::zeros(IxDyn(&[3]));
+        let mut array = ArrayD::<f64>::zeros(IxDyn(&[3]));
         array[[0]] = 1.0;
         array[[1]] = 2.0;
         array[[2]] = 3.0;
         let foo = Polynomial::new(array);
-        let mut bar = Array::zeros(IxDyn(&[1]));
+        let mut bar = Array::<f64, _>::zeros(IxDyn(&[1]));
         bar[[0]] = 2.0;
         println!("foo.eval(&bar.view()): {:#?}", foo.eval(&bar.view()));
         assert_eq!(foo.eval(&bar.view()).unwrap()[[]], 17.0);
@@ -601,7 +740,7 @@ mod test {
             Polynomial::<f64>::new(array)
         };
 
-        assert_eq!(foo.mul(&bar), bar.mul(&foo));
+        assert_eq!(foo.mul(&bar).unwrap(), bar.mul(&foo).unwrap());
     }
     #[test]
     fn make_eval_poly_2d() {
@@ -918,6 +1057,6 @@ mod test {
             array[[6]] = 288.0;
             Polynomial::<f64>::new(array)
         };
-        assert_eq!(composer.compose(&[&foo, &bar]).unwrap(), expected);
+        assert_eq!(composer.compose_scalar(&[&foo, &bar]).unwrap(), expected);
     }
 }
