@@ -896,4 +896,43 @@ mod test {
         let expected = (&term * &expected).unwrap();
         assert_eq!(expected, actual);
     }
+    #[test]
+    fn test_compose() {
+        let composer = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 3]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[0, 2]] = 3.0;
+            coefs[[1, 0]] = 4.0;
+            coefs[[1, 1]] = 5.0;
+            coefs[[1, 2]] = 6.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let foo = {
+            let mut array = ArrayD::zeros(IxDyn(&[3]));
+            array[[0]] = 1.0;
+            array[[1]] = 2.0;
+            array[[2]] = 3.0;
+            Polynomial::<f64>::new(array)
+        };
+        let bar = {
+            let mut array = ArrayD::zeros(IxDyn(&[3]));
+            array[[0]] = 2.0;
+            array[[1]] = 3.0;
+            array[[2]] = 4.0;
+            Polynomial::<f64>::new(array)
+        };
+        let expected = {
+            let mut array = ArrayD::zeros(IxDyn(&[7]));
+            array[[0]] = 55.0;
+            array[[1]] = 205.0;
+            array[[2]] = 541.0;
+            array[[3]] = 817.0;
+            array[[4]] = 942.0;
+            array[[5]] = 624.0;
+            array[[6]] = 288.0;
+            Polynomial::<f64>::new(array)
+        };
+        assert_eq!(composer.compose(&[&foo, &bar]).unwrap(), expected);
+    }
 }
