@@ -53,6 +53,7 @@ pub enum Expression<T> {
     },
 }
 
+type CreateResult<T> = Result<Expression<T>, PolynomialError>;
 #[derive(Debug, Clone)]
 pub enum ExpandedExpression<T> {
     Polynomial(Polynomial<T>),
@@ -73,8 +74,54 @@ where
         + One
         + NumCast,
 {
+    pub fn polynomial(p: &Polynomial<T>) -> Self {
+        Expression::Polynomial(p.clone())
+    }
+    pub fn add(&self, right: &Self) -> CreateResult<T> {
+        if self.dimension() != right.dimension() {
+            return Err(PolynomialError::Composition)
+        }
+        Ok(Expression::Add{left: Box::new(self.clone()), right: Box::new(right.clone())})
+    }
+    pub fn sub(&self, right: &Self) -> CreateResult<T> {
+        if self.dimension() != right.dimension() {
+            return Err(PolynomialError::Composition)
+        }
+        Ok(Expression::Sub{left: Box::new(self.clone()), right: Box::new(right.clone())})
+    }
+    pub fn mul(&self, right: &Self) -> CreateResult<T> {
+        if self.dimension() != right.dimension() {
+            return Err(PolynomialError::Composition)
+        }
+        Ok(Expression::Mul{left: Box::new(self.clone()), right: Box::new(right.clone())})
+    }
+    pub fn div(&self, denom: &Self) -> CreateResult<T> {
+        if self.dimension() != denom.dimension() {
+            return Err(PolynomialError::Composition)
+        }
+        Ok(Expression::Div{num: Box::new(self.clone()), denom: Box::new(denom.clone())})
+    }
+    pub fn scale(&self, scale: T) -> CreateResult<T> {
+        Ok(Expression::Scale{ scale, expression: Box::new(self.clone())})
+    }
+    pub fn deriv_integ(&self, wrt: &[isize]) -> CreateResult<T> {
+        Ok(Expression::DerivInteg{ expression: Box::new(self.clone()), wrt: wrt.to_vec() })
+    }
+    pub fn pow(&self, power: usize) -> CreateResult<T> {
+        Ok(Expression::Pow{ expression: Box::new(self.clone()), power })
+    }
     pub fn dimension(&self) -> usize {
-        todo!()
+        use Expression::*;
+        match self {
+            Polynomial(p) => p.dimension(),
+            Add { left, right } => left.dimension(),
+            Sub { left, right } => left.dimension(),
+            Mul { left, right } => left.dimension(),
+            Div { num, denom } => num.dimension(),
+            Scale { scale, expression } => expression.dimension(),
+            DerivInteg { expression, wrt } => expression.dimension(),
+            Pow { expression, power } => expression.dimension(),
+        }
     }
     pub fn zero(dimension: usize) -> Self {
         Expression::Polynomial(Polynomial::zero(dimension))
@@ -148,25 +195,25 @@ where
             Pow { expression, power } => todo!(),
         }
     }
-    fn deriv_integ(&self, wrt: &[isize]) -> Result<Expression<T>, PolynomialError> {
+    fn deriv_integ_expand(&self, wrt: &[isize]) -> Result<Expression<T>, PolynomialError> {
         use Expression::*;
         match self {
             Polynomial(p) => Ok(Polynomial(p.deriv_integ(&wrt)?)),
             Add { left, right } => Ok(Add {
-                left: Box::new(left.deriv_integ(&wrt)?),
-                right: Box::new(right.deriv_integ(&wrt)?),
+                left: Box::new(left.deriv_integ_expand(&wrt)?),
+                right: Box::new(right.deriv_integ_expand(&wrt)?),
             }),
             Sub { left, right } => Ok(Sub {
-                left: Box::new(left.deriv_integ(&wrt)?),
-                right: Box::new(right.deriv_integ(&wrt)?),
+                left: Box::new(left.deriv_integ_expand(&wrt)?),
+                right: Box::new(right.deriv_integ_expand(&wrt)?),
             }),
             Mul { left, right } => Ok(Add {
                 left: Box::new(Mul {
-                    left: Box::new(left.deriv_integ(&wrt)?),
+                    left: Box::new(left.deriv_integ_expand(&wrt)?),
                     right: right.clone(),
                 }),
                 right: Box::new(Mul {
-                    left: Box::new(right.deriv_integ(&wrt)?),
+                    left: Box::new(right.deriv_integ_expand(&wrt)?),
                     right: left.clone(),
                 }),
             }),
@@ -196,7 +243,7 @@ where
             // }),
             Scale { scale, expression } => Ok(Scale {
                 scale: *scale,
-                expression: Box::new(expression.deriv_integ(&wrt)?),
+                expression: Box::new(expression.deriv_integ_expand(&wrt)?),
             }),
             DerivInteg {
                 expression,
@@ -207,7 +254,7 @@ where
                     .zip(inner_wrt)
                     .map(|(x, y)| x + y)
                     .collect::<Vec<_>>();
-                Ok(expression.deriv_integ(&wrt.as_slice())?)
+                Ok(expression.deriv_integ_expand(&wrt.as_slice())?)
             }
             Pow { expression, power } => {
                 let scale: T = <T as NumCast>::from(power - 1)
@@ -217,7 +264,7 @@ where
                         scale,
                         expression: expression.clone(),
                     }),
-                    right: Box::new(expression.deriv_integ(&wrt)?),
+                    right: Box::new(expression.deriv_integ_expand(&wrt)?),
                 })
             }
         }
@@ -358,7 +405,7 @@ where
                     denom,
                 }),
             },
-            DerivInteg { expression, wrt } => expression.deriv_integ(&wrt)?.expand(),
+            DerivInteg { expression, wrt } => expression.deriv_integ_expand(&wrt)?.expand(),
             Pow { expression, power } => match expression.expand()? {
                 ExpandedExpression::Polynomial(p) => {
                     Ok(ExpandedExpression::Polynomial(p.pow(*power)?))
