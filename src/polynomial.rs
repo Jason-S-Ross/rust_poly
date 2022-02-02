@@ -2,7 +2,7 @@ use ahash::AHashSet;
 use bitvec::prelude::*;
 use ndarray::{
     Array, ArrayD, ArrayView, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex, SliceArg,
-    SliceInfoElem,
+    SliceInfoElem, ScalarOperand
 };
 use num_traits::cast::NumCast;
 use num_traits::identities::{One, Zero};
@@ -60,13 +60,16 @@ pub struct Polynomial<S> {
 
 impl<S> Polynomial<S>
 where
-    S: Add<Output = S> + Mul<Output = S> + Copy + Zero + One,
+    S: Add<Output = S> + Mul<Output = S> + ScalarOperand + Copy + Zero + One,
 {
     pub fn new(coefficients: ArrayD<S>) -> Self {
         Polynomial { coefficients }
     }
     pub fn shape(&self) -> Vec<usize> {
         self.coefficients.shape().iter().cloned().collect()
+    }
+    pub fn scale(&self, scalar: S) -> Self {
+        Self::new(self.coefficients.clone() * scalar)
     }
     // Evaluates coefficients generically
     fn polyval<D>(coefs: &ArrayView<S, D>, values: &[S]) -> Result<S, ()>
@@ -105,6 +108,45 @@ where
                 (Some(acc), Some(term)) => Some(acc + term),
             });
         res.ok_or(())?.ok_or(())
+    }
+
+    /// Composes one polynomial with another
+    pub fn compose(&self, values: &[&Self]) -> Result<Self, ()> {
+        let dimension = values.iter().next().ok_or(())?.shape().len();
+        if values.iter().any(|x| x.shape().len() != dimension) {
+            return Err(());
+        }
+        let res = self.coefficients
+            .indexed_iter()
+            .map(|(index, coef)| {
+                let term = index
+                    .into_dimension()
+                    .as_array_view()
+                    .iter()
+                    .enumerate()
+                    .map(|(dim, power)| {
+                        let val = values.get(dim)?;
+                        val.pow(*power).ok()
+                    })
+                    .reduce(|acc, val| match (acc, val) {
+                        (None, None) => None,
+                        (Some(x), None) => Some(x),
+                        (None, Some(x)) => Some(x),
+                        (Some(x), Some(y)) => (&x * &y).ok()
+                    })?;
+                match term {
+                    Some(t) => Some(t.scale(*coef)),
+                    None => Some(Self::one(dimension).scale(*coef)),
+                }
+            })
+            .reduce(|acc, term| match (acc, term) {
+                (None, None) => None,
+                (Some(acc), None) => Some(acc),
+                (None, Some(term)) => Some(term),
+                (Some(acc), Some(term)) => (&acc + &term).ok(),
+            });
+        res.ok_or(())?.ok_or(())
+
     }
     /// Evaluate a polynomial on an array of scalars.
     pub fn eval_scalar(&self, values: &[S]) -> Result<S, ()> {
@@ -400,6 +442,32 @@ where
             }
         }
     }
+    pub fn pow(&self, exp: usize) -> Result<Self, ()> {
+        let dimension = self.shape().len();
+        if exp == 0 {
+            return Ok(Self::one(dimension));
+        }
+        if exp == 1 {
+            return Ok(self.clone());
+        }
+        let mut result = Self::one(dimension);
+        let mut last_pow = self.clone();
+        let powarray = [exp];
+        let bit_view = powarray.view_bits::<Lsb0>();
+        match bit_view.last_one() {
+            Some(bitfinal) => {
+                for (bit, _) in bit_view.iter().zip(0..bitfinal + 1) {
+                    let b = bit.to_owned();
+                    if *b {
+                        result = (&result * &last_pow)?;
+                    }
+                    last_pow = (&last_pow * &last_pow)?;
+                }
+                Ok(result)
+            }
+            None => Err(())
+        }
+    }
     pub fn one(dimension: usize) -> Self {
         let coefficients = ArrayD::<S>::ones(vec![1; dimension].as_slice());
         Self { coefficients }
@@ -412,7 +480,7 @@ where
 
 impl<S> Mul for &Polynomial<S>
 where
-    S: Clone + Zero + One + Mul<Output = S> + Copy + Add,
+    S: Zero + One + Mul<Output = S> + Copy + Add + ScalarOperand,
 {
     type Output = Result<Polynomial<S>, ()>;
 
@@ -426,7 +494,7 @@ where
 
 impl<S> Add for &Polynomial<S>
 where
-    S: Clone + Zero + One + Copy + Add,
+    S: Zero + One + Copy + Add + ScalarOperand,
 {
     type Output = Result<Polynomial<S>, ()>;
 
@@ -802,5 +870,30 @@ mod test {
         assert_eq!(pow(3, 1), 3);
         assert_eq!(pow(3, 2), 9);
         assert_eq!(pow(3, 3), 27);
+    }
+    #[test]
+    fn test_integ_poly_pow() {
+        let term = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 3]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[0, 2]] = 3.0;
+            coefs[[1, 0]] = 4.0;
+            coefs[[1, 1]] = 5.0;
+            coefs[[1, 2]] = 6.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let actual = term.pow(2).unwrap();
+        let expected = (&term * &term).unwrap();
+        assert_eq!(expected, actual);
+        let actual = term.pow(3).unwrap();
+        let expected = (&term * &expected).unwrap();
+        assert_eq!(expected, actual);
+        let actual = term.pow(4).unwrap();
+        let expected = (&term * &expected).unwrap();
+        assert_eq!(expected, actual);
+        let actual = term.pow(5).unwrap();
+        let expected = (&term * &expected).unwrap();
+        assert_eq!(expected, actual);
     }
 }
