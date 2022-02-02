@@ -4,13 +4,20 @@
 // use pyo3::prelude::*;
 // use pyo3::types::PyTuple;
 // use pyo3::exceptions;
-use ndarray::{array, Array, ArrayD, ArrayView, Dim, IxDynImpl, ShapeBuilder, Dimension, IntoDimension, IxDyn, Axis, NdIndex};
+use ndarray::{
+    array, Array, ArrayD, ArrayView, Dim, IxDynImpl,
+    ShapeBuilder, Dimension, IntoDimension, IxDyn, Axis, NdIndex,
+    SliceInfo, SliceInfoElem, SliceArg
+};
 use num_traits::identities::{Zero, One};
 use num_traits::cast::NumCast;
+use ahash::AHashSet;
 use std::ops::{Add, Mul, Div};
 use std::iter;
 use std::convert::{TryFrom, TryInto};
+use bitvec::prelude::*;
 use std::error::Error;
+use std::convert::AsRef;
 
 /// Permutations of N things taken k at a time, i.e., k-permutations of N
 fn perm(K: usize, n: usize) -> usize {
@@ -23,6 +30,33 @@ fn perm(K: usize, n: usize) -> usize {
     ((K - n + 1)..(K + 1)).reduce(|prod, val| prod * val).unwrap_or(1)
 }
 
+fn pow<T>(val: T, pow: usize) -> T
+where
+    T: Mul<Output = T> + One + Copy {
+    if pow == 0 {
+        return T::one();
+    }
+    if pow == 1 {
+        return val;
+    }
+    let mut result = T::one();
+    let mut last_pow = val;
+    let powarray = [pow];
+    let bit_view = powarray.view_bits::<Lsb0>();
+    match bit_view.last_one() {
+        Some(bitfinal) => {
+            for (bit, i) in bit_view.iter().zip(0..bitfinal + 1){
+                let b = bit.to_owned();
+                if *b {
+                    result = result * last_pow;
+                }
+                last_pow = last_pow * last_pow;
+            }
+            result
+        },
+        None => val
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 struct Polynomial<S>
 {
@@ -41,11 +75,58 @@ where
     fn shape(&self) -> Vec<usize> {
         self.coefficients.shape().iter().cloned().collect()
     }
+    // Evaluates coefficients generically
+    fn polyval<D>(coefs: &ArrayView<S, D>, values: &[S]) -> Result<S, ()>
+    where
+        D: Dimension,
+        Dim<IxDynImpl>: NdIndex<D>,
+    {
+        let res = coefs
+                .indexed_iter()
+                .map(|(index, coef)| {
+                    let term = index.into_dimension()
+                        .as_array_view()
+                        .iter()
+                        .enumerate()
+                        .map(|(dim, power)| {
+                            let val = *values.get(dim)?;
+                            let prod = pow(val, *power);
+                            Some(prod)
+                        })
+                        .reduce(|acc, val| {
+                            match (acc, val) {
+                                (None, None) => None,
+                                (Some(x), None) => Some(x),
+                                (None, Some(x)) => Some(x),
+                                (Some(x), Some(y)) => Some(x * y)
+                            }
+                        })?;
+                    match term {
+                        Some(t) => Some(*coef * t),
+                        None => Some(*coef)
+                    }
+                })
+            .reduce(|acc, term| {
+                match (acc, term) {
+                    (None, None) => None,
+                    (Some(acc), None) => Some(acc),
+                    (None, Some(term)) => Some(term),
+                    (Some(acc), Some(term)) => Some(acc + term),
+                }
+            });
+        res.ok_or(())?.ok_or(())
+
+    }
+    /// Evaluate a polynomial on an array of scalars.
+    fn eval_scalar(&self, values: &[S]) -> Result<S, ()> {
+        Polynomial::<S>::polyval(&self.coefficients.view(), values)
+    }
     fn eval<'a, D>(&'a self, values: &ArrayView<S, D>)
                    -> Result<Array<S, Dim<IxDynImpl>>, ()>
     where
         D: Dimension,
         Dim<IxDynImpl>: NdIndex<D>,
+        [SliceInfoElem]: SliceArg<D>
     {
         let val_shape: Vec<_> = values.shape().iter().cloned().collect();
         let outputshape = Polynomial::<S>::get_shape_eval(&self.shape(), &val_shape);
@@ -53,56 +134,45 @@ where
         self.eval_no_alloc(values, &mut output)?;
         Ok(output)
     }
-    fn eval_no_alloc<D>(
+    fn eval_no_alloc<'a, D>(
         &self,
-        values: &ArrayView<S, D>,
-        output: &mut Array<S, Dim<IxDynImpl>>
+        values: &'a ArrayView<S, D>,
+        output: &'a mut Array<S, Dim<IxDynImpl>>
     ) -> Result<(), ()>
     where
         D: Dimension,
         Dim<IxDynImpl>: NdIndex<D>,
+        [SliceInfoElem]: SliceArg<D>
     {
         for (result_index, result_val) in output.indexed_iter_mut() {
-            let this_slice = result_index.as_array_view().to_slice().unwrap_or(&[]);
-            let res = self.coefficients
-                    .indexed_iter()
-                    .map(|(index, coef)| {
-                        let term = index.into_dimension()
-                            .as_array_view()
-                            .iter()
-                            .enumerate()
-                            .map(|(dim, power)| {
-                                let slice = IxDyn([this_slice, &[dim]].concat().as_slice());
-                                let val = *values.get(slice)?;
-                                let prod = iter::repeat(val)
-                                    .take(*power)
-                                    .reduce(|p, q| p * q)?;
-                                Some(prod)
-                            })
-                            .reduce(|acc, val| {
-                                match (acc, val) {
-                                    (None, None) => None,
-                                    (Some(x), None) => Some(x),
-                                    (None, Some(x)) => Some(x),
-                                    (Some(x), Some(y)) => Some(x * y)
-                                }
-                            })?;
-                        match term {
-                            Some(t) => Some(*coef * t),
-                            None => Some(*coef)
-                        }
-                    })
-                .reduce(|acc, term| {
-                    match (acc, term) {
-                        (None, None) => None,
-                        (Some(acc), None) => Some(acc),
-                        (None, Some(term)) => Some(term),
-                        (Some(acc), Some(term)) => Some(acc + term),
-                    }
-                });
-            *result_val = res.ok_or(())?.ok_or(())?;
+            let slice_positions: Vec<_> = result_index
+                .as_array_view()
+                .iter()
+                .map(|x| SliceInfoElem::Index(*x as isize))
+                .chain([SliceInfoElem::Slice{start:0, end:None, step:1}])
+                .collect();
+            let some_vals = values.slice(slice_positions.as_slice());
+            let res = self.eval_scalar(&some_vals.as_slice().unwrap());
+            *result_val = res?;
         }
         Ok(())
+    }
+    /// Gets the shape of the result of partial evaluation
+    fn get_shape_partial(coef_shape: &[usize], target_indices: &[usize]) -> Result<Vec<usize>, ()> {
+        if target_indices.iter().any(|x| x >= &coef_shape.len()) {
+            return Err(())
+        }
+        let mut unique: AHashSet<usize> = AHashSet::with_capacity(target_indices.len());
+        if !target_indices.iter().all(|x| unique.insert(*x)) {
+            return Err(())
+        }
+        Ok(coef_shape.iter().enumerate().map(|(i, x)| {
+            if unique.contains(&i) {
+                1
+            } else {
+                *x
+            }
+        }).collect())
     }
     /// Gets the shape of the result of evaluating a polynomial
     fn get_shape_eval(coef_shape: &[usize], val_shape: &[usize]) -> Result<Vec<usize>, ()> {
@@ -200,6 +270,43 @@ where
         let mut result = ArrayD::<S>::zeros(new_shape);
         self.deriv_no_alloc(arg, &mut result).or(Err(()))?;
         Ok(Polynomial::new(result))
+    }
+    /// Partial evaluation on a subset of axes.
+    fn partial(&self, target_indices: &[usize], target_vals: &[S]) -> Result<Self, ()>
+        where
+        S: std::fmt::Debug
+    {
+        let shape = Polynomial::<S>::get_shape_partial(&self.shape(), target_indices)?;
+        if target_indices.len() != target_vals.len() {
+            return Err(())
+        }
+        let target_vals = {
+            let mut vals: Vec<_> = target_vals
+                .iter()
+                .enumerate()
+                .collect();
+            vals.sort_by_key(|(i, _)| target_indices[*i]);
+            vals.iter().map(|(_, x)| x).cloned().cloned().collect::<Vec<_>>()
+        };
+        let mut coefs = ArrayD::<S>::zeros(shape);
+        let indices: AHashSet<_> = target_indices.iter().collect();
+        for (to_index, to_val) in coefs.indexed_iter_mut() {
+            let slice: Vec<_> = to_index
+                .as_array_view()
+                .iter()
+                .enumerate()
+                .map(|(i, index)| {
+                    if indices.contains(&i) {
+                        SliceInfoElem::Slice{start: 0, end: None, step: 1}
+                    } else {
+                        SliceInfoElem::Index(*index as isize)
+                    }
+                })
+                .collect();
+            let subcoefs = self.coefficients.slice(slice.as_slice());
+            *to_val = Polynomial::<S>::polyval(&subcoefs, &target_vals.as_slice())?;
+        }
+        Ok(Polynomial::new(coefs))
     }
     /// Panics on out-of-bounds
     fn integ_no_alloc(&self, arg: &[usize], output: &mut ArrayD<S>) -> Result<(), ()>
@@ -429,6 +536,16 @@ mod test {
         assert_eq!(foo.eval(&bar.view()).unwrap()[[]], 108.0);
     }
     #[test]
+    fn make_eval_scalar_2d() {
+        let mut array = ArrayD::zeros(IxDyn(&[2, 2]));
+        array[[0, 0]] = 1.0;
+        array[[0, 1]] = 2.0;
+        array[[1, 0]] = 3.0;
+        array[[1, 1]] = 4.0;
+        let foo = Polynomial::new(array);
+        assert_eq!(foo.eval_scalar(&[3., 7.]).unwrap(), 108.0);
+    }
+    #[test]
     fn square_poly_2d() {
         let term = {
             let mut coefs = ArrayD::zeros(IxDyn(&[2, 2]));
@@ -450,6 +567,80 @@ mod test {
             coefs[[0, 2]] = 4.0;
             coefs[[1, 2]] = 16.0;
             coefs[[2, 2]] = 16.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        assert_eq!(expected, actual);
+    }
+    #[test]
+    fn partial_poly_2d() {
+        let term = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 2]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[1, 0]] = 3.0;
+            coefs[[1, 1]] = 4.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let actual = term.partial(&[0], &[1.0]).unwrap();
+        let expected = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[1, 2]));
+            coefs[[0, 0]] = 4.0;
+            coefs[[0, 1]] = 6.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        assert_eq!(expected, actual);
+    }
+    #[test]
+    fn partial_poly_2d_2() {
+        let term = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 2]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[1, 0]] = 3.0;
+            coefs[[1, 1]] = 4.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let actual = term.partial(&[1], &[1.0]).unwrap();
+        let expected = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 1]));
+            coefs[[0, 0]] = 3.0;
+            coefs[[1, 0]] = 7.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        assert_eq!(expected, actual);
+    }
+    #[test]
+    fn partial_poly_2d_3() {
+        let term = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 2]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[1, 0]] = 3.0;
+            coefs[[1, 1]] = 4.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let actual = term.partial(&[0, 1], &[1.0, 3.0]).unwrap();
+        let expected = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[1, 1]));
+            coefs[[0, 0]] = 22.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        assert_eq!(expected, actual);
+    }
+    #[test]
+    fn partial_poly_2d_4() {
+        let term = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[2, 2]));
+            coefs[[0, 0]] = 1.0;
+            coefs[[0, 1]] = 2.0;
+            coefs[[1, 0]] = 3.0;
+            coefs[[1, 1]] = 4.0;
+            Polynomial::<f64>::new(coefs)
+        };
+        let actual = term.partial(&[1, 0], &[3.0, 1.0]).unwrap();
+        let expected = {
+            let mut coefs = ArrayD::zeros(IxDyn(&[1, 1]));
+            coefs[[0, 0]] = 22.0;
             Polynomial::<f64>::new(coefs)
         };
         assert_eq!(expected, actual);
@@ -476,7 +667,6 @@ mod test {
     fn test_reduce() {
         let foo = vec![Some(3)];
         let res = foo.iter().map(|v| *v).reduce(|acc, val| {
-            println!("acc: {:#?}, val: {:#?}", acc, val);
             match (acc, val) {
                 (None, None) => None,
                 (Some(x), None) => Some(x),
@@ -485,25 +675,19 @@ mod test {
             }
             //Some((acc? + val?))
         });
-        println!("res: {:?}", res);
     }
     #[test]
     fn test_array0() {
         use ndarray::arr0;
         let foo = arr0(5.0);
         let dim = foo.raw_dim();
-        println!("test dim: {:#}", dim.as_array_view());
-        println!("foo: {:#}", foo);
     }
     #[test]
     fn test_array2() {
         let bar = array![[1.0, 2.0],[3.0, 4.0]];
-        println!("bar: {:?}", bar);
         let dim = bar.raw_dim();
         let (_, bazdim) = dim.as_array_view().split_at(Axis(0), dim.as_array_view().len() - 1);
-        println!("bar dim: {:#?}", bazdim);
         let baz = Array::<f64, _>::zeros(bazdim.to_slice().unwrap());
-        println!("baz: {:#}", baz);
     }
     #[test]
     fn test_perms() {
@@ -584,5 +768,12 @@ mod test {
             Polynomial::<f64>::new(coefs)
         };
         assert_eq!(expected, actual.unwrap());
+    }
+    #[test]
+    fn test_pow() {
+        assert_eq!(pow(3, 0), 1);
+        assert_eq!(pow(3, 1), 3);
+        assert_eq!(pow(3, 2), 9);
+        assert_eq!(pow(3, 3), 27);
     }
 }
