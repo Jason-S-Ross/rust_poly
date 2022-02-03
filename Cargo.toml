@@ -1,17 +1,37 @@
 [package]
-name = "polynomial"
+name = "rust_poly"
 version = "0.1.0"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "polynomial"
-crate-type = ["cdylib"]
+name = "rust_poly"
+crate-type = ["cdylib", "lib"]
+path = "src/lib.rs"
 
 [dependencies]
-ndarray = "0.15"
+ndarray = { version = "0.15", features = [ "rayon" ] }
 num-traits = "0.2.14"
 ahash = "0.7.6"
 bitvec = "0.22"
-# pyo3 = { version = "0.15.1", features = ["extension-module"] }
-# numpy = "0.15"
+pyo3 = { version = "0.15.1", features = ["extension-module"] }
+numpy = "0.15"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "stiffness"
+harness = false
+
+
+[profile.bench]
+debug = true
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+[profile.release]
+debug = true
+opt-level = 3

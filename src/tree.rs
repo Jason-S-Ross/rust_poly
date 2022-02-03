@@ -1,16 +1,18 @@
 use crate::polynomial::{pow, Polynomial, PolynomialError};
+use ahash::AHashSet;
 use bitvec::prelude::*;
 use ndarray::{
-    Array, ArrayBase, ArrayD, ArrayView, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex,
+    Array, ArrayBase, ArrayD, ArrayView, ArrayViewD, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex,
     OwnedRepr, ScalarOperand, SliceArg, SliceInfoElem,
 };
 use num_traits::cast::NumCast;
 use num_traits::identities::{One, Zero};
+use num_traits::pow::Pow;
 use std::ops::{Add, Div, Mul, Sub};
 
 pub fn pow_array<T>(array: ArrayD<T>, exp: usize) -> ArrayD<T>
 where
-    T: Mul<Output = T> + Copy + One,
+    T: Mul<Output = T> + Copy + One + Pow<u16, Output = T>,
 {
     let mut output = array.clone();
     for val in output.iter_mut() {
@@ -62,6 +64,33 @@ pub enum ExpandedExpression<T> {
         denom: Polynomial<T>,
     },
 }
+
+impl<T> ExpandedExpression<T>
+where
+    T: Add<Output = T>
+        + Sub<Output = T>
+        + Mul<Output = T>
+        + Div<Output = T>
+        + ScalarOperand
+        + Copy
+        + Zero
+        + One
+        + NumCast
+        + Pow<u16, Output = T>
+        + Send
+        + Sync,
+{
+    pub fn to_expression(&self) -> Result<Expression<T>, PolynomialError> {
+        match self {
+            ExpandedExpression::Polynomial(p) => Ok(Expression::Polynomial(p.clone())),
+            ExpandedExpression::Rational { num, denom } => {
+                Ok(Expression::Polynomial(num.clone())
+                    .div(&Expression::Polynomial(denom.clone()))?)
+            }
+        }
+    }
+}
+
 impl<T> Expression<T>
 where
     T: Add<Output = T>
@@ -72,44 +101,77 @@ where
         + Copy
         + Zero
         + One
-        + NumCast,
+        + NumCast
+        + Pow<u16, Output = T>
+        + Send
+        + Sync,
 {
+    #[inline]
     pub fn polynomial(p: &Polynomial<T>) -> Self {
         Expression::Polynomial(p.clone())
     }
+    #[inline]
     pub fn add(&self, right: &Self) -> CreateResult<T> {
         if self.dimension() != right.dimension() {
-            return Err(PolynomialError::Composition)
+            return Err(PolynomialError::Composition);
         }
-        Ok(Expression::Add{left: Box::new(self.clone()), right: Box::new(right.clone())})
+        Ok(Expression::Add {
+            left: Box::new(self.clone()),
+            right: Box::new(right.clone()),
+        })
     }
+    #[inline]
     pub fn sub(&self, right: &Self) -> CreateResult<T> {
         if self.dimension() != right.dimension() {
-            return Err(PolynomialError::Composition)
+            return Err(PolynomialError::Composition);
         }
-        Ok(Expression::Sub{left: Box::new(self.clone()), right: Box::new(right.clone())})
+        Ok(Expression::Sub {
+            left: Box::new(self.clone()),
+            right: Box::new(right.clone()),
+        })
     }
+    #[inline]
     pub fn mul(&self, right: &Self) -> CreateResult<T> {
         if self.dimension() != right.dimension() {
-            return Err(PolynomialError::Composition)
+            return Err(PolynomialError::Composition);
         }
-        Ok(Expression::Mul{left: Box::new(self.clone()), right: Box::new(right.clone())})
+        Ok(Expression::Mul {
+            left: Box::new(self.clone()),
+            right: Box::new(right.clone()),
+        })
     }
+    #[inline]
     pub fn div(&self, denom: &Self) -> CreateResult<T> {
         if self.dimension() != denom.dimension() {
-            return Err(PolynomialError::Composition)
+            return Err(PolynomialError::Composition);
         }
-        Ok(Expression::Div{num: Box::new(self.clone()), denom: Box::new(denom.clone())})
+        Ok(Expression::Div {
+            num: Box::new(self.clone()),
+            denom: Box::new(denom.clone()),
+        })
     }
+    #[inline]
     pub fn scale(&self, scale: T) -> CreateResult<T> {
-        Ok(Expression::Scale{ scale, expression: Box::new(self.clone())})
+        Ok(Expression::Scale {
+            scale,
+            expression: Box::new(self.clone()),
+        })
     }
+    #[inline]
     pub fn deriv_integ(&self, wrt: &[isize]) -> CreateResult<T> {
-        Ok(Expression::DerivInteg{ expression: Box::new(self.clone()), wrt: wrt.to_vec() })
+        Ok(Expression::DerivInteg {
+            expression: Box::new(self.clone()),
+            wrt: wrt.to_vec(),
+        })
     }
+    #[inline]
     pub fn pow(&self, power: usize) -> CreateResult<T> {
-        Ok(Expression::Pow{ expression: Box::new(self.clone()), power })
+        Ok(Expression::Pow {
+            expression: Box::new(self.clone()),
+            power,
+        })
     }
+    #[inline]
     pub fn dimension(&self) -> usize {
         use Expression::*;
         match self {
@@ -123,21 +185,117 @@ where
             Pow { expression, power } => expression.dimension(),
         }
     }
+
+    #[inline]
+    pub fn drop_params(&self, to_drop: &[usize]) -> Result<Self, PolynomialError> {
+        use Expression::*;
+        match self {
+            Polynomial(p) => Ok(Polynomial(p.drop_params(to_drop)?)),
+            Add { left, right } => Ok(Add {
+                left: Box::new(left.drop_params(to_drop)?),
+                right: Box::new(right.drop_params(to_drop)?),
+            }),
+            Sub { left, right } => Ok(Sub {
+                left: Box::new(left.drop_params(to_drop)?),
+                right: Box::new(right.drop_params(to_drop)?),
+            }),
+            Mul { left, right } => Ok(Mul {
+                left: Box::new(left.drop_params(to_drop)?),
+                right: Box::new(right.drop_params(to_drop)?),
+            }),
+            Div { num, denom } => Ok(Div {
+                num: Box::new(num.drop_params(to_drop)?),
+                denom: Box::new(denom.drop_params(to_drop)?),
+            }),
+            Scale { scale, expression } => Ok(Scale {
+                scale: *scale,
+                expression: Box::new(expression.drop_params(to_drop)?),
+            }),
+            DerivInteg { expression, wrt } => Ok(DerivInteg {
+                wrt: wrt.clone(),
+                expression: Box::new(expression.drop_params(to_drop)?),
+            }),
+            Pow { expression, power } => Ok(Pow {
+                expression: Box::new(expression.drop_params(to_drop)?),
+                power: *power,
+            }),
+        }
+    }
+    #[inline]
+    pub fn shape(&self) -> Vec<usize> {
+        use Expression::*;
+        match self {
+            Polynomial(p) => p.shape(),
+            Add { left, right } => left
+                .shape()
+                .iter()
+                .zip(right.shape().iter())
+                .map(|(x, y)| if x > y { *x } else { *y })
+                .collect(),
+            Sub { left, right } => left
+                .shape()
+                .iter()
+                .zip(right.shape().iter())
+                .map(|(x, y)| if x > y { *x } else { *y })
+                .collect(),
+            Mul { left, right } => left
+                .shape()
+                .iter()
+                .zip(right.shape().iter())
+                .map(|(x, y)| if x > y { *x } else { *y })
+                .collect(),
+            Div { num, denom } => num
+                .shape()
+                .iter()
+                .zip(denom.shape().iter())
+                .map(|(x, y)| if x > y { *x } else { *y })
+                .collect(),
+            Scale { scale, expression } => expression.shape(),
+            DerivInteg { expression, wrt } => expression.shape(),
+            Pow { expression, power } => expression.shape(),
+        }
+    }
+    #[inline]
+    pub fn to_constant(&self) -> Result<T, PolynomialError> {
+        use Expression::*;
+        match self {
+            Polynomial(p) => p.to_constant(),
+            Div { num, denom } => Ok(num.to_constant()? / denom.to_constant()?),
+            Scale { scale, expression } => Ok(*scale * expression.to_constant()?),
+            Pow { expression, power } => Ok(pow(expression.to_constant()?, *power)),
+            _ => Err(PolynomialError::Other(
+                "Attempted to get constant value on non-atomic expression. Try expanding?"
+                    .to_string(),
+            )),
+        }
+    }
+    /// The variables in this polynomial that have non-zero power
+    #[inline]
+    pub fn dofs(&self) -> AHashSet<usize> {
+        match self {
+            Expression::Polynomial(p) => p.dofs(),
+            Expression::Add { left, right } => left.dofs().union(&right.dofs()).cloned().collect(),
+            Expression::Sub { left, right } => left.dofs().union(&right.dofs()).cloned().collect(),
+            Expression::Mul { left, right } => left.dofs().union(&right.dofs()).cloned().collect(),
+            Expression::Div { num, denom } => num.dofs().union(&denom.dofs()).cloned().collect(),
+            Expression::Scale { scale, expression } => expression.dofs(),
+            Expression::DerivInteg { expression, wrt } => expression.dofs(),
+            Expression::Pow { expression, power } => expression.dofs(),
+        }
+    }
+    #[inline]
     pub fn zero(dimension: usize) -> Self {
         Expression::Polynomial(Polynomial::zero(dimension))
     }
+    #[inline]
     pub fn one(dimension: usize) -> Self {
         Expression::Polynomial(Polynomial::one(dimension))
     }
-    pub fn eval<D>(
+    #[inline]
+    pub fn eval(
         &self,
-        values: &ArrayView<T, D>,
-    ) -> Result<Array<T, Dim<IxDynImpl>>, PolynomialError>
-    where
-        D: Dimension,
-        Dim<IxDynImpl>: NdIndex<D>,
-        [SliceInfoElem]: SliceArg<D>,
-        // ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>: One,
+        values: &ArrayViewD<T>,
+    ) -> Result<ArrayD<T>, PolynomialError>
     {
         use Expression::*;
         match self {
@@ -157,16 +315,46 @@ where
             }
         }
     }
-    fn deriv_integ_eval<D>(
+    #[inline]
+    pub fn partial(&self, indices: &[usize], values: &[T]) -> Result<Self, PolynomialError> {
+        use Expression::*;
+        match self {
+            Polynomial(p) => Ok(Polynomial(p.partial(indices, values)?)),
+            Add { left, right } => Ok(Add {
+                left: Box::new(left.partial(indices, values)?),
+                right: Box::new(right.partial(indices, values)?),
+            }),
+            Sub { left, right } => Ok(Sub {
+                left: Box::new(left.partial(indices, values)?),
+                right: Box::new(right.partial(indices, values)?),
+            }),
+            Mul { left, right } => Ok(Mul {
+                left: Box::new(left.partial(indices, values)?),
+                right: Box::new(right.partial(indices, values)?),
+            }),
+            Div { num, denom } => Ok(Div {
+                num: Box::new(num.partial(indices, values)?),
+                denom: Box::new(denom.partial(indices, values)?),
+            }),
+            Scale { scale, expression } => Ok(Scale {
+                scale: *scale,
+                expression: Box::new(expression.partial(indices, values)?),
+            }),
+            DerivInteg { expression, wrt } => Ok(expression
+                .deriv_integ_expand(wrt)?
+                .partial(indices, values)?),
+            Pow { expression, power } => Ok(Pow {
+                expression: Box::new(expression.partial(indices, values)?),
+                power: *power,
+            }),
+        }
+    }
+    #[inline]
+    fn deriv_integ_eval(
         &self,
         wrt: &[isize],
-        values: &ArrayView<T, D>,
-    ) -> Result<Array<T, Dim<IxDynImpl>>, PolynomialError>
-    where
-        D: Dimension,
-        Dim<IxDynImpl>: NdIndex<D>,
-        [SliceInfoElem]: SliceArg<D>,
-        // ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>: One,
+        values: &ArrayViewD<T>,
+    ) -> Result<ArrayD<T>, PolynomialError>
     {
         use Expression::*;
         match self {
@@ -195,6 +383,7 @@ where
             Pow { expression, power } => todo!(),
         }
     }
+    #[inline]
     fn deriv_integ_expand(&self, wrt: &[isize]) -> Result<Expression<T>, PolynomialError> {
         use Expression::*;
         match self {
@@ -217,30 +406,34 @@ where
                     right: left.clone(),
                 }),
             }),
-            Div { num, denom } => Err(PolynomialError::Other(
-                "Derivative/integral of rational not implemented".to_string(),
-            )),
-            // Ok(Div{
-            //
-            //         Sub{
-            //             left: Box::new(
-            //                 Mul{
-            //                     left: Box::new(num.deriv_integ(&wrt)?),
-            //                     right: denom.clone(),
-            //                 }
-            //             ),
-            //             right: Box::new(
-            //                 Mul{
-            //                     left: Box::new(denom.deriv_integ(&wrt)?),
-            //                     right: num.clone(),
-            //                 }
-            //             ),
-            //         }
-            //     ),
-            //     denom: Box::new(
-            //         Pow{ expression: denom.clone(), power: 2 }
-            //     )
-            // }),
+            Div { num, denom } => {
+                let wrt_hash: AHashSet<_> = wrt
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, x)| if *x > 0 { Some(i) } else { None })
+                    .collect();
+                let denom_dofs = denom.dofs();
+                if wrt_hash.intersection(&denom_dofs).count() == 0 {
+                    Ok(Div {
+                        num: Box::new(Sub {
+                            left: Box::new(Mul {
+                                left: Box::new(num.deriv_integ(&wrt)?),
+                                right: denom.clone(),
+                            }),
+                            right: Box::new(Mul {
+                                left: Box::new(denom.deriv_integ(&wrt)?),
+                                right: num.clone(),
+                            }),
+                        }),
+                        denom: Box::new(Pow {
+                            expression: denom.clone(),
+                            power: 2,
+                        }),
+                    })
+                } else {
+                    Err(PolynomialError::Other("Can't perform integral/derivative operation if active dofs are in denominator".to_string()))
+                }
+            }
             Scale { scale, expression } => Ok(Scale {
                 scale: *scale,
                 expression: Box::new(expression.deriv_integ_expand(&wrt)?),
@@ -270,6 +463,7 @@ where
         }
     }
     /// Expands all compositions as you go
+    #[inline]
     pub fn expand(&self) -> Result<ExpandedExpression<T>, PolynomialError> {
         use Expression::*;
         match self {
@@ -416,5 +610,26 @@ where
                 }),
             },
         }
+    }
+}
+
+impl<T> std::fmt::Display for Expression<T>
+where
+    T: std::fmt::Display + Zero + One,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Expression::Polynomial(p) => format!("{}", p),
+            Expression::Add { left, right } => format!("({}) + ({})", left, right),
+            Expression::Sub { left, right } => format!("({}) - ({})", left, right),
+            Expression::Mul { left, right } => format!("({}) * ({})", left, right),
+            Expression::Div { num, denom } => format!("({}) / ({})", num, denom),
+            Expression::Scale { scale, expression } => format!("{} * ({})", scale, expression),
+            Expression::DerivInteg { expression, wrt } => {
+                format!("deriv({}, [{}])", expression, format!("{:?}", wrt))
+            }
+            Expression::Pow { expression, power } => format!("pow({}, {})", expression, power),
+        };
+        write!(f, "{}", s)
     }
 }
