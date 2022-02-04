@@ -11,8 +11,4 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 
-
-dependencies = ["cffi"]
-
-[tool.maturin]
-bindings = "cffi"
+dependencies = ["numpy"]
