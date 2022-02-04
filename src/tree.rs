@@ -20,7 +20,6 @@
 //     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 //     IN THE SOFTWARE.
 
-
 use crate::polynomial::{pow, Polynomial, PolynomialError};
 use ahash::AHashSet;
 use ndarray::{ArrayD, ArrayViewD, ScalarOperand};

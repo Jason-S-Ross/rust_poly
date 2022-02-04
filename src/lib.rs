@@ -20,7 +20,6 @@
 //     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 //     IN THE SOFTWARE.
 
-
 use numpy::{IntoPyArray, PyArray1, PyArrayDyn, PyReadonlyArray1, PyReadonlyArrayDyn};
 use polynomial::PolynomialError;
 use pyo3::exceptions::PyValueError;
@@ -223,7 +222,9 @@ impl PyNumberProtocol for FloatExpression {
                 expression: lhs.expression.scale(v)?,
             });
         };
-        Err(PyValueError::new_err("Invalid type provided for division"))
+        Err(PyValueError::new_err(
+            "Invalid type provided for multiplication",
+        ))
     }
 
     fn __rmul__(&self, other: &'p PyAny) -> PyResult<Self> {
@@ -237,7 +238,9 @@ impl PyNumberProtocol for FloatExpression {
                 expression: self.expression.scale(v)?,
             });
         };
-        Err(PyValueError::new_err("Invalid type provided for division"))
+        Err(PyValueError::new_err(
+            "Invalid type provided for right multiplication",
+        ))
     }
 }
 
