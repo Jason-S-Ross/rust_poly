@@ -1,23 +1,12 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayDyn, PyReadonlyArray1, PyReadonlyArrayDyn};
-// use numpy::ndarray::{Array, ArrayD, Array1, Dimension, ShapeBuilder, Axis, Dim, IxDyn};
-use numpy::convert::ToPyArray;
 use polynomial::PolynomialError;
-use pyo3::class::number::{
-    PyNumberAddProtocol, PyNumberMulProtocol, PyNumberSubProtocol, PyNumberTruedivProtocol,
-};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyTuple, PyType};
-use pyo3::{exceptions, PyNumberProtocol, PyObjectProtocol};
+use pyo3::types::PyType;
+use pyo3::{PyNumberProtocol, PyObjectProtocol};
 use tree::Expression;
 pub mod polynomial;
 pub mod tree;
-
-#[derive(Clone)]
-#[pyclass]
-struct FloatExpandedExpression {
-    expression: crate::tree::ExpandedExpression<f64>,
-}
 
 #[derive(Clone)]
 #[pyclass]
@@ -56,7 +45,7 @@ impl FloatExpression {
     /// Evaluate the polynomial on values
     fn partial<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         indices: PyReadonlyArray1<i64>,
         values: PyReadonlyArray1<f64>,
     ) -> PyResult<Self> {
@@ -74,11 +63,11 @@ impl FloatExpression {
             indices_
         };
         let values = values.as_array();
-        let values = values.as_slice().ok_or(PolynomialError::Other(
-            "Failed to process value slice".to_string(),
-        ))?;
+        let values = values
+            .as_slice()
+            .ok_or_else(|| PolynomialError::Other("Failed to process value slice".to_string()))?;
         Ok(FloatExpression {
-            expression: self.expression.partial(&indices, &values)?,
+            expression: self.expression.partial(&indices, values)?,
         })
     }
     /// Derivative (negative numbers integrate)
@@ -143,11 +132,11 @@ impl FloatExpression {
     }
     /// Try to reduce to a constant
     fn to_constant(&self) -> PyResult<f64> {
-        return Ok(self.expression.to_constant()?);
+        Ok(self.expression.to_constant()?)
     }
     // TODO Some kind of "Kind"
     #[classmethod]
-    fn zero(cls: &PyType, dimension: i64) -> PyResult<Self> {
+    fn zero(_cls: &PyType, dimension: i64) -> PyResult<Self> {
         if dimension < 0 {
             return Err(PolynomialError::Other("Negative dimension is invalid".to_string()).into());
         }
@@ -157,7 +146,7 @@ impl FloatExpression {
         })
     }
     #[classmethod]
-    fn one(cls: &PyType, dimension: i64) -> PyResult<Self> {
+    fn one(_cls: &PyType, dimension: i64) -> PyResult<Self> {
         if dimension < 0 {
             return Err(PolynomialError::Other("Negative dimension is invalid".to_string()).into());
         }
@@ -198,7 +187,7 @@ impl PyNumberProtocol for FloatExpression {
                 expression: lhs.expression.scale(1.0 / v)?,
             });
         };
-        return Err(PyValueError::new_err("Invalid type provided for division"));
+        Err(PyValueError::new_err("Invalid type provided for division"))
     }
     fn __mul__(lhs: Self, rhs: &'p PyAny) -> PyResult<Self> {
         if let Ok(FloatExpression { expression: other }) = rhs.extract() {
@@ -211,7 +200,7 @@ impl PyNumberProtocol for FloatExpression {
                 expression: lhs.expression.scale(v)?,
             });
         };
-        return Err(PyValueError::new_err("Invalid type provided for division"));
+        Err(PyValueError::new_err("Invalid type provided for division"))
     }
 
     fn __rmul__(&self, other: &'p PyAny) -> PyResult<Self> {
@@ -225,7 +214,7 @@ impl PyNumberProtocol for FloatExpression {
                 expression: self.expression.scale(v)?,
             });
         };
-        return Err(PyValueError::new_err("Invalid type provided for division"));
+        Err(PyValueError::new_err("Invalid type provided for division"))
     }
 }
 
@@ -233,6 +222,5 @@ impl PyNumberProtocol for FloatExpression {
 #[pyo3(name = "rust_poly")]
 fn polynomial(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<FloatExpression>()?;
-    m.add_class::<FloatExpandedExpression>()?;
     Ok(())
 }
