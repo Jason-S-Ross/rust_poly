@@ -2,7 +2,7 @@ use ahash::AHashSet;
 use bitvec::prelude::*;
 use ndarray::{
     Array, ArrayD, ArrayView, ArrayViewD, Dim, Dimension, IntoDimension, IxDynImpl, NdIndex,
-    ScalarOperand, SliceArg, SliceInfoElem,
+    ScalarOperand, SliceArg, SliceInfoElem, ShapeBuilder,
 };
 use ndarray::parallel::prelude::*;
 use num_traits::cast::NumCast;
@@ -13,7 +13,7 @@ use std::ops::{Add, Div, Mul, Sub};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyErr;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PolynomialError {
     Composition,
     Evaluation,
@@ -264,39 +264,33 @@ where
     #[inline]
     fn polyval_vector(
         coefs: &ArrayViewD<S>,
-        values: &[ArrayViewD<S>],
+        values: &ArrayViewD<S>,
     ) -> Result<ArrayD<S>, PolynomialError> {
-        let shape = values
-            .iter()
-            .next()
-            .ok_or_else(|| PolynomialError::Other("No values to evaluate".to_string()))?
-            .shape();
-        let coef_vec = coefs.indexed_iter()
-            .map(|(ix, coef)| {
-                let values = ix.into_dimension().as_array_view().to_owned();
-                (values, *coef)
-            }).collect::<Vec<_>>();
-        let coef_vec_iter = coef_vec.par_iter();
-        // let res = coefs
-        //     .indexed_iter()
-        let res = coef_vec
-            .par_iter()
-            .map(|(index, coef)| {
+        let shape = values.shape()[..values.shape().len() - 1].into_shape();
+        let size = values.shape().len();
+        let res = coefs
+            .indexed_iter()
+            .filter_map(|(index, coef)| {
                 if coef.is_zero() {
                     None
                 } else {
                     let prod = index
-                        // .into_dimension()
-                        // .as_array_view()
+                        .into_dimension()
+                        .as_array_view()
                         .iter()
                         .enumerate()
                         .filter_map(|(dim, power)| {
+                            use SliceInfoElem::*;
+                            let slice = std::iter::repeat(Slice{ start: 0, end: None, step: 1 })
+                                .take(size - 1)
+                                .chain([Index(dim as isize)])
+                                .collect::<Vec<_>>();
                             if *power == 0 {
                                 None
                             } else if *power == 1 {
-                                Some(values.get(dim)?.to_owned())
+                                Some(values.slice(slice.as_slice()).to_owned())
                             } else {
-                                let vals = values.get(dim)?;
+                                let vals = values.slice(slice.as_slice());
                                 let res = vals.mapv(|x| pow(x, *power));
                                 Some(res)
                             }
@@ -304,20 +298,12 @@ where
                         .reduce(|acc, val| acc * val);
                     match prod {
                         Some(p) => Some(p * *coef),
-                        None => Some(ArrayD::from_elem(shape, *coef))
+                        None => Some(ArrayD::from_elem(shape.clone(), *coef))
                     }
                 }
             })
-            // .reduce(|acc, term| acc + term)
-            .reduce(|| None,
-                    |acc, term| {
-                        match (acc, term) {
-                            (None, None) => None,
-                            (None, Some(v)) | (Some(v), None) => Some(v),
-                            (Some(left), Some(right)) => Some(left + right),
-                        }
-                    })
-            .ok_or_else(|| PolynomialError::Other("Polynomial reduced to nothing".to_string()))?;
+            .reduce(|acc, term| acc + term)
+            .unwrap_or_else(|| ArrayD::zeros(shape));
         Ok(res)
     }
 
@@ -423,8 +409,34 @@ where
     ) -> Result<ArrayD<S>, PolynomialError>
     {
         use SliceInfoElem::*;
+        let result_shape = IxDyn(values
+            .shape()
+            .iter()
+            .take(values.shape().len() - 1)
+            .cloned()
+            .collect::<Vec<_>>()
+            .as_slice());
+        if values.shape().len() == 1 {
+            return Self::polyval_vector(&self.coefficients.view(), values)
+        }
+        let new_len = values
+            .shape()
+            .iter()
+            .take(values.shape().len() - 1)
+            .cloned()
+            .reduce(|acc, x| acc * x)
+            .ok_or_else(|| PolynomialError::Other("Failed to get new len".to_string()))?;
         let val_shape: Vec<_> = values.shape().iter().cloned().collect();
         let last_shape = val_shape[val_shape.len() - 1];
+
+        let new_shape = [
+            new_len,
+            *values
+                .shape()
+                .iter()
+                .last()
+                .ok_or_else(|| PolynomialError::Other("Failed to get new shape".to_string()))?
+        ];
         let slices: Vec<_> = (0..last_shape).map(|x| {
             let slice = std::iter::repeat(Slice{ start: 0, end: None, step: 1 })
                 .take(val_shape.len() - 1)
@@ -432,7 +444,26 @@ where
                 .collect::<Vec<_>>();
             values.slice(slice.as_slice())
         }).collect();
-        Self::polyval_vector(&self.coefficients.view(), slices.as_slice())
+        use ndarray::{Axis, IxDyn, concatenate, CowRepr};
+        let mut out  = vec![];
+        let reshaped_vals = values.to_shape(IxDyn(&new_shape))
+            .or(Err(PolynomialError::Other("Failed to reshape values before eval".to_string())))?;
+        reshaped_vals
+            .axis_chunks_iter(Axis(0), new_len / 8)
+            .into_par_iter()
+            .map(|chunk| {
+                 Self::polyval_vector(&self.coefficients.view(), &chunk).expect("Tried to eval within a closure")
+            }
+            ).collect_into_vec(&mut out);
+        let views = out.iter().map(|x| x.view()).collect::<Vec<_>>();
+        Ok(
+            concatenate(Axis(0), views.as_slice())
+                .or(Err(PolynomialError::Other("Failed to concatenate values after eval".to_string())))?
+                .to_shape(result_shape)
+                .or(Err(PolynomialError::Other("Failed to reshape values after evaluation".to_string())))?
+                .into_owned()
+        )
+
     }
     /// Evaluates a vector on the provided buffer
     #[inline]
@@ -960,6 +991,22 @@ mod test {
         assert_eq!(foo.eval(&bar.view()).unwrap()[[]], 108.0);
     }
     #[test]
+    fn make_eval_poly_2d_vector() {
+        let mut array = ArrayD::zeros(IxDyn(&[2, 2]));
+        array[[0, 0]] = 1.0;
+        array[[0, 1]] = 2.0;
+        array[[1, 0]] = 3.0;
+        array[[1, 1]] = 4.0;
+        let foo = Polynomial::new(array);
+        let mut bar = ArrayD::zeros(IxDyn(&[2, 2]));
+        bar[[0, 0]] = 3.;
+        bar[[0, 1]] = 7.;
+        bar[[1, 0]] = 3.;
+        bar[[1, 1]] = 7.;
+        assert_eq!(foo.eval(&bar.view()).unwrap()[[0]], 108.0);
+        assert_eq!(foo.eval(&bar.view()).unwrap()[[1]], 108.0);
+    }
+    #[test]
     fn make_eval_scalar_2d() {
         let mut array = ArrayD::zeros(IxDyn(&[2, 2]));
         array[[0, 0]] = 1.0;
@@ -968,6 +1015,19 @@ mod test {
         array[[1, 1]] = 4.0;
         let foo = Polynomial::new(array);
         assert_eq!(foo.eval_scalar(&[3., 7.]).unwrap(), 108.0);
+    }
+    #[test]
+    fn eval_big_array() {
+        let values = (0..2000000).map(|x| x as f64).collect::<Vec<_>>();
+        let values = ArrayD::from_shape_vec(IxDyn(&[1000000, 2]), values).unwrap();
+        let mut array = ArrayD::zeros(IxDyn(&[2, 2]));
+        array[[0, 0]] = 1.0;
+        array[[0, 1]] = 2.0;
+        array[[1, 0]] = 3.0;
+        array[[1, 1]] = 4.0;
+        let foo = Polynomial::<f64>::new(array);
+        foo.eval(&values.view()).expect("This shouldn't be an error!");
+        //assert_eq!(foo.eval_scalar(&[3., 7.]).unwrap(), 108.0);
     }
     #[test]
     fn square_poly_2d() {
