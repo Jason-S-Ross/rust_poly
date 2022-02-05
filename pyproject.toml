@@ -5,10 +5,18 @@ build-backend = "maturin"
 [project]
 name = "rust_poly"
 requires-python = ">=3.6"
+description = "Fast polynomial and rational evaluation library"
+readme = "README.md"
+license = {name = "MIT"}
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
-
 dependencies = ["numpy"]
+authors = [
+    {name = "Jason Ross"}
+]
+
+[project.urls]
+repository = "github.com/Jason-S-Ross/rust_poly"
