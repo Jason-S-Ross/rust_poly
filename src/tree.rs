@@ -20,24 +20,13 @@
 //     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 //     IN THE SOFTWARE.
 
-use crate::polynomial::{pow, Polynomial, PolynomialError};
+use crate::polynomial::{Polynomial, PolynomialError};
+use crate::pow::Pow;
 use ahash::AHashSet;
 use ndarray::{ArrayD, ArrayViewD, ScalarOperand};
 use num_traits::cast::NumCast;
 use num_traits::identities::{One, Zero};
-use num_traits::pow::Pow;
 use std::ops::{Add, Div, Mul, Sub};
-
-pub fn pow_array<T>(array: ArrayD<T>, exp: usize) -> ArrayD<T>
-where
-    T: Mul<Output = T> + Copy + One + Pow<u16, Output = T>,
-{
-    let mut output = array;
-    for val in output.iter_mut() {
-        *val = pow(*val, exp);
-    }
-    output
-}
 
 /// A lazy polynomial expression
 #[derive(Debug, Clone)]
@@ -75,7 +64,7 @@ pub enum Expression<T> {
 
 type CreateResult<T> = Result<Expression<T>, PolynomialError>;
 #[derive(Debug, Clone)]
-pub enum ExpandedExpression<T> {
+pub enum ExpandedExpression<T: Clone> {
     Polynomial(Polynomial<T>),
     Rational {
         num: Polynomial<T>,
@@ -83,9 +72,10 @@ pub enum ExpandedExpression<T> {
     },
 }
 
-impl<T> ExpandedExpression<T>
+impl<'a, T: Clone> ExpandedExpression<T>
 where
-    T: Add<Output = T>
+    T: 'a
+        + Add<Output = T>
         + Sub<Output = T>
         + Mul<Output = T>
         + Div<Output = T>
@@ -94,8 +84,8 @@ where
         + Zero
         + One
         + NumCast
-        + Pow<u16, Output = T>
         + Send
+        + Pow<usize, Output = T>
         + Sync,
 {
     pub fn to_expression(&self) -> Result<Expression<T>, PolynomialError> {
@@ -109,25 +99,52 @@ where
     }
 }
 
-impl<T> Expression<T>
-where
-    T: Add<Output = T>
-        + Sub<Output = T>
-        + Mul<Output = T>
-        + Div<Output = T>
-        + ScalarOperand
-        + Copy
-        + Zero
-        + One
-        + NumCast
-        + Pow<u16, Output = T>
-        + Send
-        + Sync,
-{
+impl<T: Copy> Expression<T> {
     #[inline]
     pub fn polynomial(p: &Polynomial<T>) -> Self {
         Expression::Polynomial(p.clone())
     }
+    pub fn astype<S>(&self) -> CreateResult<S>
+    where
+        S: NumCast + Copy,
+        T: NumCast,
+    {
+        use Expression::*;
+        match self {
+            Polynomial(p) => Ok(Polynomial(p.astype()?)),
+            Add { left, right } => Ok(Add {
+                left: Box::new(left.astype()?),
+                right: Box::new(right.astype()?),
+            }),
+            Sub { left, right } => Ok(Sub {
+                left: Box::new(left.astype()?),
+                right: Box::new(right.astype()?),
+            }),
+            Mul { left, right } => Ok(Mul {
+                left: Box::new(left.astype()?),
+                right: Box::new(right.astype()?),
+            }),
+            Div { num, denom } => Ok(Div {
+                num: Box::new(num.astype()?),
+                denom: Box::new(denom.astype()?),
+            }),
+            Scale { scale, expression } => Ok(Scale {
+                scale: NumCast::from(*scale).ok_or_else(|| {
+                    PolynomialError::Other("Could not convert data type".to_string())
+                })?,
+                expression: Box::new(expression.astype()?),
+            }),
+            DerivInteg { expression, wrt } => Ok(DerivInteg {
+                expression: Box::new(expression.astype()?),
+                wrt: wrt.clone(),
+            }),
+            Pow { expression, power } => Ok(Pow {
+                power: *power,
+                expression: Box::new(expression.astype()?),
+            }),
+        }
+    }
+
     #[inline]
     pub fn add(&self, right: &Self) -> CreateResult<T> {
         if self.dimension() != right.dimension() {
@@ -169,10 +186,12 @@ where
         })
     }
     #[inline]
-    pub fn scale(&self, scale: T) -> CreateResult<T> {
+    pub fn scale<S, U>(&self, scale: S) -> CreateResult<U>
+        where T: NumCast, S: NumCast + Copy, U: NumCast + Copy
+    {
         Ok(Expression::Scale {
-            scale,
-            expression: Box::new(self.clone()),
+            scale: NumCast::from(scale).ok_or_else(|| PolynomialError::Other("Invalid type for scale".to_string()))?,
+            expression: Box::new(self.clone().astype()?),
         })
     }
     #[inline]
@@ -286,13 +305,16 @@ where
         }
     }
     #[inline]
-    pub fn to_constant(&self) -> Result<T, PolynomialError> {
+    pub fn to_constant(&self) -> Result<T, PolynomialError>
+    where
+        T: Zero + Mul<Output = T> + Div<Output = T> + Pow<usize, Output = T>,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => p.to_constant(),
             Div { num, denom } => Ok(num.to_constant()? / denom.to_constant()?),
             Scale { scale, expression } => Ok(*scale * expression.to_constant()?),
-            Pow { expression, power } => Ok(pow(expression.to_constant()?, *power)),
+            Pow { expression, power } => Ok(expression.to_constant()?.pow(*power)),
             _ => Err(PolynomialError::Other(
                 "Attempted to get constant value on non-atomic expression. Try expanding?"
                     .to_string(),
@@ -320,15 +342,33 @@ where
         }
     }
     #[inline]
-    pub fn zero(dimension: usize) -> Self {
+    pub fn zero(dimension: usize) -> Self
+    where
+        T: Zero,
+    {
         Expression::Polynomial(Polynomial::zero(dimension))
     }
     #[inline]
-    pub fn one(dimension: usize) -> Self {
+    pub fn one(dimension: usize) -> Self
+    where
+        T: One,
+    {
         Expression::Polynomial(Polynomial::one(dimension))
     }
     #[inline]
-    pub fn eval(&self, values: &ArrayViewD<T>) -> Result<ArrayD<T>, PolynomialError> {
+    pub fn eval(&self, values: &ArrayViewD<T>) -> Result<ArrayD<T>, PolynomialError>
+    where
+        T: Zero
+            + Pow<usize, Output = T>
+            + Mul<Output = T>
+            + Add<Output = T>
+            + ScalarOperand
+            + Send
+            + Sync
+            + Sub<Output = T>
+            + Div<Output = T>
+            + NumCast,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => p.eval(values),
@@ -343,12 +383,15 @@ where
             DerivInteg { expression, wrt } => expression.deriv_integ_eval(wrt.as_slice(), values),
             Pow { expression, power } => {
                 let res = expression.eval(values)?;
-                Ok(pow_array(res, *power))
+                Ok(res.pow(*power))
             }
         }
     }
     #[inline]
-    pub fn partial(&self, indices: &[usize], values: &[T]) -> Result<Self, PolynomialError> {
+    pub fn partial(&self, indices: &[usize], values: &[T]) -> Result<Self, PolynomialError>
+    where
+        T: Zero + Add<Output = T> + Mul<Output = T> + Pow<usize, Output = T> + NumCast,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => Ok(Polynomial(p.partial(indices, values)?)),
@@ -386,7 +429,18 @@ where
         &self,
         wrt: &[isize],
         values: &ArrayViewD<T>,
-    ) -> Result<ArrayD<T>, PolynomialError> {
+    ) -> Result<ArrayD<T>, PolynomialError>
+    where
+        T: NumCast
+            + Zero
+            + Mul<Output = T>
+            + Pow<usize, Output = T>
+            + Send
+            + Sync
+            + ScalarOperand
+            + Div<Output = T>
+            + Sub<Output = T>,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => p.deriv_integ(wrt)?.eval(values),
@@ -418,7 +472,10 @@ where
         }
     }
     #[inline]
-    fn deriv_integ_expand(&self, wrt: &[isize]) -> Result<Expression<T>, PolynomialError> {
+    fn deriv_integ_expand(&self, wrt: &[isize]) -> Result<Expression<T>, PolynomialError>
+    where
+        T: NumCast + Mul<Output = T> + Zero,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => Ok(Polynomial(p.deriv_integ(wrt)?)),
@@ -498,7 +555,10 @@ where
     }
     /// Expands all compositions as you go
     #[inline]
-    pub fn expand(&self) -> Result<ExpandedExpression<T>, PolynomialError> {
+    pub fn expand(&self) -> Result<ExpandedExpression<T>, PolynomialError>
+    where
+        T: Zero + One + ScalarOperand + Sub<Output = T> + NumCast,
+    {
         use Expression::*;
         match self {
             Polynomial(p) => Ok(ExpandedExpression::Polynomial(p.clone())),

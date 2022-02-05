@@ -1,4 +1,4 @@
-from . import FloatExpression
+from . import ExpressionTree
 import numpy as np
 from functools import reduce
 def from_terms(terms):
@@ -17,4 +17,4 @@ def from_terms(terms):
             coefs[tuple(powers)] = coef
         except IndexError as e:
             raise ValueError("Indices must be integers", e)
-    return FloatExpression(coefs)
+    return ExpressionTree(coefs)
