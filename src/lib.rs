@@ -21,12 +21,17 @@
 //     IN THE SOFTWARE.
 
 use numpy::{IntoPyArray, PyArray1, PyArrayDyn, PyReadonlyArray1, PyReadonlyArrayDyn};
+use numpy::npyffi::array::PY_ARRAY_API;
+use numpy::npyffi::types::NPY_TYPES;
 use polynomial::PolynomialError;
 use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
+use pyo3::{prelude::*, AsPyPointer};
+use pyo3::conversion::FromPyPointer;
 use pyo3::types::PyType;
+
 use pyo3::{PyNumberProtocol, PyObjectProtocol};
 use tree::Expression;
+use num_complex::Complex;
 pub mod polynomial;
 pub mod tree;
 
@@ -38,14 +43,34 @@ pub mod tree;
 struct FloatExpression {
     expression: crate::tree::Expression<f64>,
 }
+enum ExpressionType {
+    Float(Expression<f64>),
+    Complex(Expression<Complex<f64>>),
+    Int(Expression<i64>),
+}
+
+/// Converts a python object to a numpy array using the numpy API.
+unsafe fn array_from_any<'py>(object: PyObject, py: &'py Python<'py>, descr: NPY_TYPES) -> &'py PyAny {
+    use numpy::npyffi::objects::PyArray_Descr;
+    let mintype: *mut PyArray_Descr = PY_ARRAY_API.PyArray_DescrFromType((descr as u32) as i32);
+    let ob_ptr: *mut pyo3::ffi::PyObject = object.as_ptr();
+    let desc = PY_ARRAY_API.PyArray_DescrFromObject(ob_ptr, mintype);
+    let context: *mut pyo3::ffi::PyObject = std::ptr::null_mut();
+    let ar = PY_ARRAY_API.PyArray_FromAny(ob_ptr, desc, 0, 32, 0, context);
+    PyAny::from_borrowed_ptr(*py, ar)
+}
+
 #[pymethods]
 impl FloatExpression {
     #[new]
-    fn new(vals: PyReadonlyArrayDyn<f64>) -> Self {
+    fn new<'py>(py: Python<'py>, vals: &PyAny) -> PyResult<Self> {
+        let vals: PyReadonlyArrayDyn<f64> = unsafe{
+            array_from_any(vals.to_object(py), &py, NPY_TYPES::NPY_FLOAT)
+        }.extract()?;
         let p = crate::polynomial::Polynomial::<f64>::new(vals.as_array().to_owned());
-        FloatExpression {
+        Ok(FloatExpression {
             expression: Expression::polynomial(&p),
-        }
+        })
     }
     /// Evaluates the expression on an array of values.
     ///

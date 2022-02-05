@@ -11,10 +11,11 @@ path = "src/lib.rs"
 
 [dependencies]
 ndarray = { version = "0.15", features = [ "rayon" ] }
+num-complex = "*"
 num-traits = "0.2.14"
 ahash = "0.7.6"
 bitvec = "0.22"
-pyo3 = { version = "0.15.1", features = ["extension-module"] }
+pyo3 = { version = "0.15.1", features = ["extension-module", "num-complex"] }
 numpy = "0.15"
 
 [dev-dependencies]
