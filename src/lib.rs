@@ -30,8 +30,11 @@ use tree::Expression;
 pub mod polynomial;
 pub mod tree;
 
+/// An abstract expression tree with concrete terms. Lazily evaluates arithmetic
+/// operations.
 #[derive(Clone)]
 #[pyclass]
+#[pyo3(text_signature = "(vals)")]
 struct FloatExpression {
     expression: crate::tree::Expression<f64>,
 }
@@ -44,7 +47,17 @@ impl FloatExpression {
             expression: Expression::polynomial(&p),
         }
     }
-    /// Evaluates the polynomial on an array of values
+    /// Evaluates the expression on an array of values.
+    ///
+    /// Parameters
+    /// ==========
+    ///
+    /// vals : array_like
+    ///     Shape (a, b, ..., z, n) where n matches the dimension of the expression tree
+    ///
+    /// Returns
+    /// array_like
+    ///     Shape (a, b, ..., z)
     fn __call__<'py>(
         &self,
         py: Python<'py>,
@@ -54,17 +67,44 @@ impl FloatExpression {
         Ok(self.expression.eval(&vals)?.into_pyarray(py))
     }
 
-    /// The degree of polynomial
+    /// The maximum degree of any term in the expression tree
+    #[getter]
     fn shape<'py>(&self, py: Python<'py>) -> &'py PyArray1<usize> {
         self.expression.shape().into_pyarray(py)
     }
-    /// Recursively expands the syntax tree to yield either a polynomial or a rational
+    /// The number of free parameters in the expression tree
+    #[getter]
+    fn dimension(&self) -> usize {
+        self.expression.dimension()
+    }
+    /// Recursively evaluate the syntax tree to yield either a single polynomial
+    /// or a rational with a polynomial numerator and denominator.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    #[pyo3(text_signature = "()")]
     fn expand(&self) -> PyResult<Self> {
         Ok(FloatExpression {
             expression: self.expression.expand()?.to_expression()?,
         })
     }
-    /// Evaluate the polynomial on values
+    /// Evaluate the expression tree on a subset of provided terms and return a
+    /// new expression tree.
+    ///
+    /// Parameters
+    /// ==========
+    /// indicies : array_like
+    ///     (n,) shaped array of integers. This argument specifies which terms in the
+    ///     expression are to be evaluated.
+    /// values : array_like
+    ///     (n,) shaped array of floats. This argument specifies the values to use in
+    ///     the expression.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    #[pyo3(text_signature = "(indices, values)")]
     fn partial<'py>(
         &self,
         _py: Python<'py>,
@@ -92,7 +132,18 @@ impl FloatExpression {
             expression: self.expression.partial(&indices, values)?,
         })
     }
-    /// Derivative (negative numbers integrate)
+    /// Takes the derivative of the expression with respect to multiple
+    /// parameters. Zero is a no-op. Negative numbers integrate.
+    ///
+    /// Parameters
+    /// ==========
+    /// indices: array_like of int
+    ///     shape (n,) where n is the dimension of the expression.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    #[pyo3(text_signature = "(indices)")]
     fn deriv(&self, indices: PyReadonlyArray1<i64>) -> PyResult<Self> {
         let indices = indices.as_array();
         let indices = {
@@ -106,7 +157,18 @@ impl FloatExpression {
             expression: self.expression.deriv_integ(&indices)?,
         })
     }
-    /// Integrate (negative numbers differentiate)
+    /// Takes the antiderivative of the expression with respect to multiple
+    /// parameters. Zero is a no-op. Negative numbers differentiate.
+    ///
+    /// Parameters
+    /// ==========
+    /// indices: array_like of int
+    ///     shape (n,) where n is the dimension of the expression.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    #[pyo3(text_signature = "(indices)")]
     fn integ(&self, indices: PyReadonlyArray1<i64>) -> PyResult<Self> {
         let indices = indices.as_array();
         let indices = {
@@ -120,7 +182,22 @@ impl FloatExpression {
             expression: self.expression.deriv_integ(&indices)?,
         })
     }
-    /// Drop parameters and reduce the dimensionality
+    /// Try to drop parameters and reduce the dimensionality.
+    ///
+    /// Parameters
+    /// ==========
+    /// indices: array_like of int
+    ///     shape (m,), specifies degrees of freedom to drop.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    ///
+    /// Raises
+    /// ======
+    /// ValueError
+    ///     If non-empty or invalid degrees of freedom are specified.
+    #[pyo3(text_signature = "(indices)")]
     fn drop_params(&self, indices: PyReadonlyArray1<i64>) -> PyResult<Self> {
         let indices = indices.as_array();
         let indices = {
@@ -139,7 +216,12 @@ impl FloatExpression {
             expression: self.expression.drop_params(&indices)?,
         })
     }
-    /// Drops single-dimension axes
+    /// Automatically drop empty degrees of freedom
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
+    #[pyo3(text_signature = "()")]
     fn squeeze(&self) -> PyResult<Self> {
         let to_drop = self
             .expression
@@ -152,12 +234,26 @@ impl FloatExpression {
             expression: self.expression.drop_params(to_drop.as_slice())?,
         })
     }
-    /// Try to reduce to a constant
+    /// Try to evaluate the expression and return a constant
+    ///
+    /// Raises
+    /// ======
+    ///
+    /// ValueError
+    ///     If some degrees of freedom still exist
+    #[pyo3(text_signature = "()")]
     fn to_constant(&self) -> PyResult<f64> {
         Ok(self.expression.to_constant()?)
     }
     // TODO Some kind of "Kind"
+
+    /// Construct a polynomial of desired dimension equal to the constant 1.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
     #[classmethod]
+    #[pyo3(text_signature = "()")]
     fn zero(_cls: &PyType, dimension: i64) -> PyResult<Self> {
         if dimension < 0 {
             return Err(PolynomialError::Other("Negative dimension is invalid".to_string()).into());
@@ -167,7 +263,13 @@ impl FloatExpression {
             expression: Expression::zero(dimension),
         })
     }
+    /// Construct a polynomial of desired dimension equal to the constant 0.
+    ///
+    /// Returns
+    /// =======
+    /// FloatExpression
     #[classmethod]
+    #[pyo3(text_signature = "()")]
     fn one(_cls: &PyType, dimension: i64) -> PyResult<Self> {
         if dimension < 0 {
             return Err(PolynomialError::Other("Negative dimension is invalid".to_string()).into());
@@ -244,6 +346,7 @@ impl PyNumberProtocol for FloatExpression {
     }
 }
 
+/// Provides the FloatExpression class
 #[pymodule]
 #[pyo3(name = "rust_poly")]
 fn polynomial(_py: Python, m: &PyModule) -> PyResult<()> {
