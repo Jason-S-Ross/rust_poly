@@ -54,91 +54,87 @@ enum ExpressionType {
     Int(Expression<i64>),
 }
 
+/// Performs casting for binary operations between expression trees
+macro_rules! impl_binop {
+    ($fname:ident) => {
+        fn $fname(&self, right: &Self) -> PyResult<Self> {
+            match (self, right) {
+                (ExpressionType::Float(f), ExpressionType::Complex(c))
+                | (ExpressionType::Complex(c), ExpressionType::Float(f)) => {
+                    Ok(ExpressionType::Complex(c.$fname(&f.astype()?)?))
+                }
+                (ExpressionType::Float(f), ExpressionType::Int(i))
+                | (ExpressionType::Int(i), ExpressionType::Float(f)) => {
+                    Ok(ExpressionType::Float(f.$fname(&i.astype()?)?))
+                }
+                (ExpressionType::Complex(c), ExpressionType::Int(i))
+                | (ExpressionType::Int(i), ExpressionType::Complex(c)) => {
+                    Ok(ExpressionType::Complex(c.$fname(&i.astype()?)?))
+                }
+                (ExpressionType::Float(l), ExpressionType::Float(r)) => {
+                    Ok(ExpressionType::Float(l.$fname(r)?))
+                }
+                (ExpressionType::Complex(l), ExpressionType::Complex(r)) => {
+                    Ok(ExpressionType::Complex(l.$fname(r)?))
+                }
+                (ExpressionType::Int(l), ExpressionType::Int(r)) => {
+                    Ok(ExpressionType::Int(l.$fname(r)?))
+                }
+            }
+        }
+    };
+}
+
+/// Implement pass-through methods on the members of ExpressionType
+macro_rules! impl_foreach {
+    ($fname:ident ( $($arg: ident : $ty: ty ),* ) -> PyResult<Self>, ($firstmeth:ident, $($firstclose:tt)?) $(, ($meth: ident, $close: tt) )*) => {
+        fn $fname(&self, $($arg: $ty), *) -> PyResult<Self> {
+            match self {
+                ExpressionType::Float(e) => Ok(ExpressionType::Float(e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*)),
+                ExpressionType::Complex(e) => Ok(ExpressionType::Complex(e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*)),
+                ExpressionType::Int(e) => Ok(ExpressionType::Int(e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*)),
+            }
+        }
+    };
+    ($fname:ident ( $($arg: ident : $ty: ty ),* ) $( -> $ret: ty)*, ($firstmeth:ident, $($firstclose:tt)?) $(, ($meth: ident, $close: tt) )*) => {
+        fn $fname(&self, $($arg: $ty), *) $(-> $ret )* {
+            match self {
+                ExpressionType::Float(e) => e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*,
+                ExpressionType::Complex(e) => e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*,
+                ExpressionType::Int(e) => e.$firstmeth($($arg),*)$($firstclose)?$(.$meth()$close)*,
+            }
+        }
+    };
+}
+
+        }
+    }
+
 impl ExpressionType {
-    fn shape(&self) -> Vec<usize> {
-        use ExpressionType::*;
-        match self {
-            Float(e) => e.shape(),
-            Complex(e) => e.shape(),
-            Int(e) => e.shape(),
-        }
-    }
-    fn dimension(&self) -> usize {
-        use ExpressionType::*;
-        match self {
-            Float(e) => e.dimension(),
-            Complex(e) => e.dimension(),
-            Int(e) => e.dimension(),
-        }
-    }
-    fn expand(&self) -> PyResult<Self> {
-        use ExpressionType::*;
-        match self {
-            Float(e) => Ok(Float(e.expand()?.to_expression()?)),
-            Complex(e) => Ok(Complex(e.expand()?.to_expression()?)),
-            Int(e) => Ok(Int(e.expand()?.to_expression()?)),
-        }
-    }
-    fn deriv_integ(&self, indices: &[isize]) -> PyResult<Self> {
-        use ExpressionType::*;
-        match self {
-            Float(e) => Ok(Float(e.deriv_integ(indices)?)),
-            Complex(e) => Ok(Complex(e.deriv_integ(indices)?)),
-            Int(e) => Ok(Int(e.deriv_integ(indices)?)),
-        }
-    }
-    fn drop_params(&self, indices: &[usize]) -> PyResult<Self> {
-        use ExpressionType::*;
-        match self {
-            Float(e) => Ok(Float(e.drop_params(indices)?)),
-            Complex(e) => Ok(Complex(e.drop_params(indices)?)),
-            Int(e) => Ok(Int(e.drop_params(indices)?)),
-        }
-    }
-    fn add(&self, right: &Self) -> PyResult<Self> {
-        use ExpressionType::*;
-        match (self, right) {
-            (Float(f), Complex(c)) | (Complex(c), Float(f)) => Ok(Complex(c.add(&f.astype()?)?)),
-            (Float(f), Int(i)) | (Int(i), Float(f)) => Ok(Float(f.add(&i.astype()?)?)),
-            (Complex(c), Int(i)) | (Int(i), Complex(c)) => Ok(Complex(c.add(&i.astype()?)?)),
-            (Float(l), Float(r)) => Ok(Float(l.add(r)?)),
-            (Complex(l), Complex(r)) => Ok(Complex(l.add(r)?)),
-            (Int(l), Int(r)) => Ok(Int(l.add(r)?)),
-        }
-    }
-    fn sub(&self, right: &Self) -> PyResult<Self> {
-        use ExpressionType::*;
-        match (self, right) {
-            (Float(f), Complex(c)) | (Complex(c), Float(f)) => Ok(Complex(c.sub(&f.astype()?)?)),
-            (Float(f), Int(i)) | (Int(i), Float(f)) => Ok(Float(f.sub(&i.astype()?)?)),
-            (Complex(c), Int(i)) | (Int(i), Complex(c)) => Ok(Complex(c.sub(&i.astype()?)?)),
-            (Float(l), Float(r)) => Ok(Float(l.sub(r)?)),
-            (Complex(l), Complex(r)) => Ok(Complex(l.sub(r)?)),
-            (Int(l), Int(r)) => Ok(Int(l.sub(r)?)),
-        }
-    }
-    fn mul(&self, right: &Self) -> PyResult<Self> {
-        use ExpressionType::*;
-        match (self, right) {
-            (Float(f), Complex(c)) | (Complex(c), Float(f)) => Ok(Complex(c.mul(&f.astype()?)?)),
-            (Float(f), Int(i)) | (Int(i), Float(f)) => Ok(Float(f.mul(&i.astype()?)?)),
-            (Complex(c), Int(i)) | (Int(i), Complex(c)) => Ok(Complex(c.mul(&i.astype()?)?)),
-            (Float(l), Float(r)) => Ok(Float(l.mul(r)?)),
-            (Complex(l), Complex(r)) => Ok(Complex(l.mul(r)?)),
-            (Int(l), Int(r)) => Ok(Int(l.mul(r)?)),
-        }
-    }
-    fn div(&self, right: &Self) -> PyResult<Self> {
-        use ExpressionType::*;
-        match (self, right) {
-            (Float(f), Complex(c)) | (Complex(c), Float(f)) => Ok(Complex(c.div(&f.astype()?)?)),
-            (Float(f), Int(i)) | (Int(i), Float(f)) => Ok(Float(f.div(&i.astype()?)?)),
-            (Complex(c), Int(i)) | (Int(i), Complex(c)) => Ok(Complex(c.div(&i.astype()?)?)),
-            (Float(l), Float(r)) => Ok(Float(l.div(r)?)),
-            (Complex(l), Complex(r)) => Ok(Complex(l.div(r)?)),
-            (Int(l), Int(r)) => Ok(Int(l.div(r)?)),
-        }
-    }
+    impl_foreach!(
+        expand () -> PyResult<Self>,
+        (expand, ?), (to_expression, ?)
+    );
+    impl_foreach!(
+        deriv_integ (indices: &[isize]) -> PyResult<Self>,
+        (deriv_integ, ?)
+    );
+    impl_foreach!(
+        drop_params (indices: &[usize]) -> PyResult<Self>,
+        (drop_params, ?)
+    );
+    impl_foreach!(
+        dimension () -> usize,
+        (dimension, )
+    );
+    impl_foreach!(
+        shape () -> Vec<usize>,
+        (shape, )
+    );
+    impl_binop!(add);
+    impl_binop!(sub);
+    impl_binop!(mul);
+    impl_binop!(div);
 }
 
 impl std::fmt::Display for ExpressionType {
