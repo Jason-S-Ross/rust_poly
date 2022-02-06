@@ -20,10 +20,14 @@
 //     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 //     IN THE SOFTWARE.
 
+use std::ops::{Mul, Add, Div, Sub};
+
+use ndarray::{Array, Array1, ArrayView, Dimension, NdIndex, ScalarOperand};
+use num_traits::{NumCast, Zero};
 use numpy::npyffi::array::PY_ARRAY_API;
 use numpy::npyffi::types::NPY_TYPES;
 use numpy::{
-    IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArrayDyn,
+    Element, IntoPyArray, PyArray1, PyReadonlyArray, PyReadonlyArray1, PyReadonlyArrayDyn,
 };
 use polynomial::PolynomialError;
 use pyo3::conversion::FromPyPointer;
@@ -34,6 +38,8 @@ use pyo3::{prelude::*, AsPyPointer};
 use num_complex::Complex;
 use pyo3::{PyNumberProtocol, PyObjectProtocol};
 use tree::Expression;
+
+use crate::pow::Pow;
 pub mod polynomial;
 pub mod pow;
 pub mod tree;
@@ -107,8 +113,40 @@ macro_rules! impl_foreach {
     };
 }
 
-        }
+/// Extracts a numpy array from a python object
+fn extract_array<'p, T, D>(
+    values: &PyAny,
+    py: &'p Python<'p>,
+    mintype: NPY_TYPES,
+) -> Result<PyReadonlyArray<'p, T, D>, PolynomialError>
+where
+    PyReadonlyArray<'p, T, D>: pyo3::FromPyObject<'p>,
+    D: 'p,
+{
+    let vals = unsafe { array_from_any(values.to_object(*py), py, mintype) };
+    vals.extract::<PyReadonlyArray<T, D>>()
+        .map_err(|_| PolynomialError::Other("Could not convert type".to_string()))
+}
+
+fn cast_array<T, U, D>(values: &ArrayView<U, D>) -> Result<Array<T, D>, PolynomialError>
+where
+    D: Dimension,
+    U: NumCast + Copy,
+    T: NumCast,
+    <D as Dimension>::Pattern: NdIndex<D>,
+{
+    use std::mem::MaybeUninit;
+    let mut output = Array::uninit(values.dim());
+    for (index, value) in output.indexed_iter_mut() {
+        let toval: T = NumCast::from(*values.get(index).ok_or_else(|| {
+            PolynomialError::Other("Some kind of crazy lookup error".to_string())
+        })?)
+        .ok_or_else(|| PolynomialError::Other("Could not convert data type".to_string()))?;
+        *value = MaybeUninit::new(toval);
     }
+
+    Ok(unsafe { output.assume_init() })
+}
 
 impl ExpressionType {
     impl_foreach!(
@@ -199,30 +237,55 @@ impl ExpressionTree {
     ///     Shape (a, b, ..., z, n) where n matches the dimension of the expression tree
     ///
     /// Returns
+    /// =======
     /// array_like
     ///     Shape (a, b, ..., z)
+    ///
     fn __call__<'py>(&self, py: Python<'py>, vals: &PyAny) -> PyResult<PyObject> {
         use ExpressionType::*;
+        fn eval<'py, T>(
+            expression: &Expression<T>,
+            values: &'py PyReadonlyArrayDyn<T>,
+            py: &'py Python<'py>
+        ) -> PyResult<PyObject>
+            where T: Copy
+            + Zero
+            + Pow<usize, Output = T>
+            + Mul<Output = T>
+            + Add<Output = T>
+            + Sub<Output = T>
+            + Div<Output = T>
+            + ScalarOperand
+            + Send
+            + Sync
+            + NumCast
+            + Element,
+        {
+            Ok(expression.eval(&values.as_array())?.into_pyarray(*py).to_object(*py))
+        }
         match &self.expression {
-            Float(e) => {
-                let vals =
-                    unsafe { array_from_any(vals.to_object(py), &py, NPY_TYPES::NPY_DOUBLE) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<f64>>() {
-                    return Ok(e.eval(&vals.as_array())?.into_pyarray(py).to_object(py));
+            Complex(e) => {
+                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    return eval(e, &vals, &py)
                 }
             }
-            Complex(e) => {
-                let vals =
-                    unsafe { array_from_any(vals.to_object(py), &py, NPY_TYPES::NPY_CDOUBLE) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<num_complex::Complex<f64>>>() {
-                    return Ok(e.eval(&vals.as_array())?.into_pyarray(py).to_object(py));
+            Float(e) => {
+                if let Ok(vals) = extract_array::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
+                    return eval::<>(e, &vals, &py)
+                }
+                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    return eval::<>(&e.astype()?, &vals, &py)
                 }
             }
             Int(e) => {
-                let vals =
-                    unsafe { array_from_any(vals.to_object(py), &py, NPY_TYPES::NPY_LONGLONG) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<i64>>() {
-                    return Ok(e.eval(&vals.as_array())?.into_pyarray(py).to_object(py));
+                if let Ok(vals) = extract_array::<i64, _>(vals, &py, NPY_TYPES::NPY_LONGLONG) {
+                    return eval::<>(e, &vals, &py)
+                }
+                if let Ok(vals) = extract_array::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
+                    return eval::<>(&e.astype()?, &vals, &py)
+                }
+                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    return eval::<>(&e.astype()?, &vals, &py)
                 }
             }
         }
@@ -270,87 +333,66 @@ impl ExpressionTree {
     /// FloatExpression
     #[pyo3(text_signature = "(indices, values)")]
     fn partial<'py>(&self, py: Python<'py>, indices: &PyAny, values: &PyAny) -> PyResult<Self> {
-        let indices =
-            unsafe { array_from_any(indices.to_object(py), &py, NPY_TYPES::NPY_LONGLONG) }
-                .extract::<PyReadonlyArray1<i64>>()
-                .map_err(|_| PolynomialError::Other("Index format not understood".to_string()))?;
-
+        let indices: PyReadonlyArray1<i64> = extract_array(indices, &py, NPY_TYPES::NPY_LONGLONG)?;
         // Annoying way of getting an array of usize from an array of isize or error.
-        use std::mem::MaybeUninit;
-        use ndarray::Array1;
-        use num_traits::NumCast;
-        let mut output = Array1::uninit(indices.as_array().dim());
-        for (index, value) in output.indexed_iter_mut() {
-            let toval: usize = NumCast::from(*indices.get(index).ok_or_else(|| {
-                PolynomialError::Other("Some kind of crazy lookup error".to_string())
-            })?)
-            .ok_or_else(|| PolynomialError::Other("Could not convert data type".to_string()))?;
-            *value = MaybeUninit::new(toval);
-        }
-        let indices = unsafe { output.assume_init() };
+        let indices: Array1<usize> = cast_array(&indices.as_array().view())?;
 
+        fn partial_loc<T>(
+            expression: &Expression<T>,
+            indices: Array1<usize>,
+            values: PyReadonlyArray1<T>,
+        ) -> Result<Expression<T>, PolynomialError>
+        where
+            T: Copy + Zero + Mul<Output = T> + Pow<usize, Output = T> + NumCast + Element,
+        {
+
+            expression.partial(
+                indices.as_slice().ok_or_else(|| {
+                    PolynomialError::Other("Could not convert indices to slice".to_string())
+                })?,
+                values.as_slice().map_err(|_| {
+                    PolynomialError::Other("Could not convert values to slice".to_string())
+                })?,
+            )
+        }
         // This could probably be replaced with a macro
         use ExpressionType::*;
         match &self.expression {
-            Float(e) => {
-                let vals =
-                    unsafe { array_from_any(values.to_object(py), &py, NPY_TYPES::NPY_DOUBLE) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<f64>>() {
+            Complex(e) => {
+                if let Ok(vals) = extract_array(values, &py, NPY_TYPES::NPY_CDOUBLE) {
                     return Ok(ExpressionTree {
-                        expression: Float(e.partial(
-                            indices.as_slice().ok_or_else(|| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                            vals.as_slice().map_err(|_| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                        )?),
+                        expression: Complex(partial_loc(e, indices, vals)?),
                     });
                 };
             }
-            Complex(e) => {
-                let vals =
-                    unsafe { array_from_any(values.to_object(py), &py, NPY_TYPES::NPY_CDOUBLE) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<num_complex::Complex<f64>>>() {
+            Float(e) => {
+                if let Ok(vals) = extract_array(values, &py, NPY_TYPES::NPY_DOUBLE) {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.partial(
-                            indices.as_slice().ok_or_else(|| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                            vals.as_slice().map_err(|_| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                        )?),
+                        expression: Float(partial_loc(e, indices, vals)?),
+                    });
+                };
+                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(values, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    return Ok(ExpressionTree {
+                        expression: Complex(partial_loc(&e.astype()?, indices, vals)?),
                     });
                 };
             }
             Int(e) => {
-                let vals =
-                    unsafe { array_from_any(values.to_object(py), &py, NPY_TYPES::NPY_LONGLONG) };
-                if let Ok(vals) = vals.extract::<PyReadonlyArrayDyn<i64>>() {
+                if let Ok(vals) = extract_array(values, &py, NPY_TYPES::NPY_CDOUBLE) {
                     return Ok(ExpressionTree {
-                        expression: Int(e.partial(
-                            indices.as_slice().ok_or_else(|| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                            vals.as_slice().map_err(|_| {
-                                PolynomialError::Other(
-                                    "Could not convert indices to slice".to_string(),
-                                )
-                            })?,
-                        )?),
+                        expression: Int(partial_loc(e, indices, vals)?),
                     });
                 }
+                if let Ok(vals) = extract_array::<f64, _>(values, &py, NPY_TYPES::NPY_DOUBLE) {
+                    return Ok(ExpressionTree {
+                        expression: Float(partial_loc(&e.astype()?, indices, vals)?),
+                    });
+                };
+                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(values, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    return Ok(ExpressionTree {
+                        expression: Complex(partial_loc(&e.astype()?, indices, vals)?),
+                    });
+                };
             }
         };
         Err(PyValueError::new_err(
@@ -552,17 +594,17 @@ impl PyNumberProtocol for ExpressionTree {
             Float(e) => {
                 if let Ok(v) = rhs.extract::<i64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(1.0 / v as f64)?)
+                        expression: Float(e.scale(1.0 / v as f64)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<f64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(1.0 / v)?)
+                        expression: Float(e.scale(1.0 / v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(1.0 / v)?)
+                        expression: Complex(e.scale(1.0 / v)?),
                     });
                 }
             }
@@ -579,24 +621,24 @@ impl PyNumberProtocol for ExpressionTree {
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(1.0 / v)?)
+                        expression: Complex(e.scale(1.0 / v)?),
                     });
                 }
             }
             Int(e) => {
                 if let Ok(v) = rhs.extract::<i64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(1.0 / v as f64)?)
+                        expression: Float(e.scale(1.0 / v as f64)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<f64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(1.0 / v)?)
+                        expression: Float(e.scale(1.0 / v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(1.0 / v)?)
+                        expression: Complex(e.scale(1.0 / v)?),
                     });
                 }
             }
@@ -614,17 +656,17 @@ impl PyNumberProtocol for ExpressionTree {
             Float(e) => {
                 if let Ok(v) = rhs.extract::<i64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(v)?)
+                        expression: Float(e.scale(v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<f64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(v)?)
+                        expression: Float(e.scale(v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(v)?)
+                        expression: Complex(e.scale(v)?),
                     });
                 }
             }
@@ -641,24 +683,24 @@ impl PyNumberProtocol for ExpressionTree {
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(v)?)
+                        expression: Complex(e.scale(v)?),
                     });
                 }
             }
             Int(e) => {
                 if let Ok(v) = rhs.extract::<i64>() {
                     return Ok(ExpressionTree {
-                        expression: Int(e.scale(v)?)
+                        expression: Int(e.scale(v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<f64>() {
                     return Ok(ExpressionTree {
-                        expression: Float(e.scale(v)?)
+                        expression: Float(e.scale(v)?),
                     });
                 }
                 if let Ok(v) = rhs.extract::<num_complex::Complex<f64>>() {
                     return Ok(ExpressionTree {
-                        expression: Complex(e.scale(v)?)
+                        expression: Complex(e.scale(v)?),
                     });
                 }
             }
@@ -673,7 +715,7 @@ impl PyNumberProtocol for ExpressionTree {
     }
 }
 
-/// Provides the FloatExpression class
+/// Provides the ExpressionTree class
 #[pymodule]
 #[pyo3(name = "rust_poly")]
 fn polynomial(_py: Python, m: &PyModule) -> PyResult<()> {

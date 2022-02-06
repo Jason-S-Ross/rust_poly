@@ -187,10 +187,14 @@ impl<T: Copy> Expression<T> {
     }
     #[inline]
     pub fn scale<S, U>(&self, scale: S) -> CreateResult<U>
-        where T: NumCast, S: NumCast + Copy, U: NumCast + Copy
+    where
+        T: NumCast,
+        S: NumCast + Copy,
+        U: NumCast + Copy,
     {
         Ok(Expression::Scale {
-            scale: NumCast::from(scale).ok_or_else(|| PolynomialError::Other("Invalid type for scale".to_string()))?,
+            scale: NumCast::from(scale)
+                .ok_or_else(|| PolynomialError::Other("Invalid type for scale".to_string()))?,
             expression: Box::new(self.clone().astype()?),
         })
     }
