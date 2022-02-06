@@ -153,10 +153,14 @@ impl ExpressionType {
         expand () -> PyResult<Self>,
         (expand, ?), (to_expression, ?)
     );
-    impl_foreach!(
-        deriv_integ (indices: &[isize]) -> PyResult<Self>,
-        (deriv_integ, ?)
-    );
+    fn deriv_integ(&self, indices: &[isize]) -> PyResult<Self> {
+        use ExpressionType::*;
+        match self {
+            Float(e) => Ok(Float(e.deriv_integ(indices)?)),
+            Complex(e) => Ok(Complex(e.deriv_integ(indices)?)),
+            Int(e) => Ok(Float(e.astype()?.deriv_integ(indices)?)),
+        }
+    }
     impl_foreach!(
         drop_params (indices: &[usize]) -> PyResult<Self>,
         (drop_params, ?)
@@ -265,28 +269,34 @@ impl ExpressionTree {
         }
         match &self.expression {
             Complex(e) => {
-                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
-                    return eval(e, &vals, &py)
+                match self.extract_array_sized::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    Ok(vals) => return eval(e, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
                 }
             }
             Float(e) => {
-                if let Ok(vals) = extract_array::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
-                    return eval::<>(e, &vals, &py)
+                match self.extract_array_sized::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
+                    Ok(vals) => return eval(e, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
                 }
-                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
-                    return eval::<>(&e.astype()?, &vals, &py)
+                match self.extract_array_sized::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    Ok(vals) => return eval(&e.astype()?, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
                 }
             }
             Int(e) => {
-                if let Ok(vals) = extract_array::<i64, _>(vals, &py, NPY_TYPES::NPY_LONGLONG) {
-                    return eval::<>(e, &vals, &py)
-                }
-                if let Ok(vals) = extract_array::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
-                    return eval::<>(&e.astype()?, &vals, &py)
-                }
-                if let Ok(vals) = extract_array::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
-                    return eval::<>(&e.astype()?, &vals, &py)
-                }
+                match  self.extract_array_sized::<i64, _>(vals, &py, NPY_TYPES::NPY_LONGLONG) {
+                    Ok(vals) => return eval(e, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
+                };
+                match  self.extract_array_sized::<f64, _>(vals, &py, NPY_TYPES::NPY_DOUBLE) {
+                    Ok(vals) => return eval(&e.astype()?, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
+                };
+                match self.extract_array_sized::<num_complex::Complex<f64>, _>(vals, &py, NPY_TYPES::NPY_CDOUBLE) {
+                    Ok(vals) => return eval(&e.astype()?, &vals, &py),
+                    Err(e) => if let PolynomialError::Shape = e { return Err(e.into()) }
+                };
             }
         }
         Err(PyValueError::new_err(
@@ -411,17 +421,13 @@ impl ExpressionTree {
     /// =======
     /// FloatExpression
     #[pyo3(text_signature = "(indices)")]
-    fn deriv(&self, indices: PyReadonlyArray1<i64>) -> PyResult<Self> {
-        let indices = indices.as_array();
-        let indices = {
-            let mut indices_ = vec![];
-            for index in indices {
-                indices_.push(*index as isize);
-            }
-            indices_
-        };
+    fn deriv<'py>(&self, py: Python<'py>, indices: &PyAny) -> PyResult<Self> {
+        let indices: PyReadonlyArray1<i64> = extract_array(indices, &py, NPY_TYPES::NPY_LONGLONG)?;
+        let indices: Array1<isize> = cast_array(&indices.as_array().view())?;
         Ok(ExpressionTree {
-            expression: self.expression.deriv_integ(&indices)?,
+            expression: self.expression.deriv_integ(
+                indices.as_slice().ok_or_else(|| PolynomialError::Other("Could not cast as slice".to_string()))?
+            )?,
         })
     }
     /// Takes the antiderivative of the expression with respect to multiple
@@ -436,17 +442,13 @@ impl ExpressionTree {
     /// =======
     /// FloatExpression
     #[pyo3(text_signature = "(indices)")]
-    fn integ(&self, indices: PyReadonlyArray1<i64>) -> PyResult<Self> {
-        let indices = indices.as_array();
-        let indices = {
-            let mut indices_ = vec![];
-            for index in indices {
-                indices_.push(-*index as isize);
-            }
-            indices_
-        };
+    fn integ<'py>(&self, py: Python<'py>, indices: &PyAny) -> PyResult<Self> {
+        let indices: PyReadonlyArray1<i64> = extract_array(indices, &py, NPY_TYPES::NPY_LONGLONG)?;
+        let indices: Array1<isize> = -cast_array(&indices.as_array().view())?;
         Ok(ExpressionTree {
-            expression: self.expression.deriv_integ(&indices)?,
+            expression: self.expression.deriv_integ(
+                indices.as_slice().ok_or_else(|| PolynomialError::Other("Could not cast as slice".to_string()))?
+            )?,
         })
     }
     /// Try to drop parameters and reduce the dimensionality.
@@ -712,6 +714,30 @@ impl PyNumberProtocol for ExpressionTree {
 
     fn __rmul__(&self, other: &'p PyAny) -> PyResult<Self> {
         Self::__mul__(self.clone(), other)
+    }
+}
+
+impl ExpressionTree {
+    fn extract_array_sized<'p, T, D>(
+        &self,
+        values: &PyAny,
+        py: &'p Python<'p>,
+        mintype: NPY_TYPES,
+    ) -> Result<PyReadonlyArray<'p, T, D>, PolynomialError>
+    where
+        PyReadonlyArray<'p, T, D>: pyo3::FromPyObject<'p>,
+        D: 'p,
+    {
+        let vals = unsafe { array_from_any(values.to_object(*py), py, mintype) };
+        let vals = vals.extract::<PyReadonlyArray<T, D>>()
+            .map_err(|_| PolynomialError::Type)?;
+        let shape = vals.shape().to_vec();
+        let last_shape = shape[shape.len() - 1];
+        if last_shape != self.dimension() {
+            Err(PolynomialError::Shape)
+        } else {
+            Ok(vals)
+        }
     }
 }
 

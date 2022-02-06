@@ -3,12 +3,181 @@
 Fast polynomial and rational evaluation for Python written in Rust.
 
 
+## Usage
+### Basics
+
+``` 
+>>> from rust_poly import ExpressionTree
+
+```
+
+
+We can construct a polynomial with the `ExpressionTree` constructor.
+```
+>>> poly = ExpressionTree([1, 2, 3])
+>>> print(poly)
+1 + 2x₁¹ + 3x₁², dtype = i64
+
+```
+`ExpressionTree` objects can be called on arrays and broadcast over the last dimension.
+```
+>>> poly([2])
+array(17)
+
+>>> poly([[1], [2], [3]])
+array([ 6, 17, 34])
+
+>>> poly([[[1], [2]], [[3], [4]]])
+array([[ 6, 17],
+       [34, 57]])
+
+```
+The last dimension of the argument must equal the dimension of the expression.
+
+```
+>>> poly([1, 2, 3])
+Traceback (most recent call last):
+...
+ValueError: Incompatible shape for evaluation
+
+```
+
+
+`ExpressionTree` objects can be composed and are lazily evaluated.
+```
+>>> print(poly * poly)
+(1 + 2x₁¹ + 3x₁²) * (1 + 2x₁¹ + 3x₁²), dtype = i64
+>>> (poly * poly)([2])
+array(289)
+
+```
+`ExpressionTree` objects can be "expanded".
+```
+>>> print((poly * poly).expand())
+1 + 4x₁¹ + 10x₁² + 12x₁³ + 9x₁⁴, dtype = i64
+
+```
+`ExpressionTree` objects can be scaled, added, subtracted, divided, and multiplied lazily.
+
+``` 
+>>> p1 = ExpressionTree([1, 2])
+>>> print(p1)
+1 + 2x₁¹, dtype = i64
+>>> p2 = ExpressionTree([3, 4, 5])
+>>> print(p2)
+3 + 4x₁¹ + 5x₁², dtype = i64
+>>> print(5 * p1)
+5 * (1 + 2x₁¹), dtype = i64
+>>> print(p1 + p2)
+(1 + 2x₁¹) + (3 + 4x₁¹ + 5x₁²), dtype = i64
+>>> print(p1 - p2)
+(1 + 2x₁¹) - (3 + 4x₁¹ + 5x₁²), dtype = i64
+>>> print(p1 * p2)
+(1 + 2x₁¹) * (3 + 4x₁¹ + 5x₁²), dtype = i64
+>>> print(p1 / p2)
+(1 + 2x₁¹) / (3 + 4x₁¹ + 5x₁²), dtype = i64
+
+```
+
+Different data types (float, int, and complex) can be handled. 
+
+```
+>>> poly([2.0])
+array(17.)
+
+>>> poly([2.0 + 0j])
+array(17.+0.j)
+
+>>> floatpoly = ExpressionTree([1.0, 2.0])
+>>> print((floatpoly + poly).expand())
+2 + 4x₁¹ + 3x₁², dtype = f64
+
+```
+
+
+
+### Higher-dimensional polynomials
+
+Polynomials can be defined with many dimensions.
+
+``` 
+>>> p2d = ExpressionTree([[1, 2], [3, 4]])
+>>> print(p2d)
+1 + 2x₂¹ + 3x₁¹ + 4x₁¹x₂¹, dtype = i64
+
+>>> p2d.dimension
+2
+
+```
+
+When evaluating higher dimension arrays, the last dimension of the expression to be evaluated must match the dimension of the array.
+
+```
+>>> p2d([1, 2])
+array(16)
+>>> p2d([[1], [2]])
+Traceback (most recent call last):
+...
+ValueError: Incompatible shape for evaluation
+
+>>> p2d([[1, 2, 3], [2, 3, 4]])
+Traceback (most recent call last):
+...
+ValueError: Incompatible shape for evaluation
+
+```
+
+Polynomial dimension must match for composition.
+
+``` 
+>>> p2d + p1
+Traceback (most recent call last):
+...
+ValueError: Incompatible dimensions for composition
+
+```
+
+### Other operations 
+Differentiation and integration are supported. Integer polynomials are automatically converted to floats with this method.
+
+``` 
+>>> print(p1.deriv([1]))
+deriv(1 + 2x₁¹, [1]), dtype = f64
+>>> print(p1.deriv([1]).expand())
+2, dtype = f64
+>>> print(p1.deriv([0]).expand())
+1 + 2x₁¹, dtype = f64
+
+>>> print(p2.deriv([1]))
+deriv(3 + 4x₁¹ + 5x₁², [1]), dtype = f64
+>>> print(p2.deriv([1]).expand())
+4 + 10x₁¹, dtype = f64
+
+>>> print(p1.integ([1]).expand())
+1x₁¹ + 1x₁², dtype = f64
+>>> print(p1.deriv([-1]).expand())
+1x₁¹ + 1x₁², dtype = f64
+
+
+```
+The syntax for multi-dimensional derivatives and integrals is similar:
+
+```
+>>> print(p2d.deriv([1, 0]).expand())
+3 + 4x₂¹, dtype = f64
+>>> print(p2d.deriv([0, 1]).expand())
+2 + 4x₁¹, dtype = f64
+
+```
+
+
+
+## More complex example
 Quick example of computing a stiffness matrix:
 
 ``` python
 from rust_poly import ExpressionTree as Polynomial, from_terms
 import numpy as np
-
 terms = {"x1": 0, "x2": 1, "x1a": 2, "x2a": 3,
          "x1b": 4, "x2b": 5, "x1c": 6, "x2c": 7,
          "nu": 8, "none": None}

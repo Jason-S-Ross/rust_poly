@@ -41,6 +41,8 @@ const CHUNK_SIZE: usize = 5000;
 pub enum PolynomialError {
     Composition,
     Evaluation,
+    Type,
+    Shape,
     Other(String),
 }
 
@@ -49,6 +51,12 @@ impl From<PolynomialError> for PyErr {
         match err {
             PolynomialError::Composition => {
                 PyValueError::new_err("Incompatible dimensions for composition".to_string())
+            }
+            PolynomialError::Shape => {
+                PyValueError::new_err("Incompatible shape for evaluation".to_string())
+            }
+            PolynomialError::Type => {
+                PyValueError::new_err("Unsupported data type for evaluation".to_string())
             }
             PolynomialError::Evaluation => {
                 PyValueError::new_err("Incompatibile dimensions for evaluation".to_string())
@@ -68,6 +76,12 @@ impl std::fmt::Display for PolynomialError {
                 write!(f, "Tried to evaluate argument of incompatible dimension")
             }
             PolynomialError::Other(s) => write!(f, "Something went wrong. Error message: {}", s),
+            PolynomialError::Type => {
+                write!(f, "Unsupported type for evaluation")
+            },
+            PolynomialError::Shape => {
+                write!(f, "Incompatible dimensions for evaluation")
+            },
         }
     }
 }

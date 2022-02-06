@@ -456,7 +456,7 @@ impl<T: Copy> Expression<T> {
             }
             Mul { left, right } => Ok(left.deriv_integ_eval(wrt, values)? * right.eval(values)?
                 + left.eval(values)? * right.deriv_integ_eval(wrt, values)?),
-            Div { num: _, denom: _ } => todo!(),
+            Div { num: _, denom: _ } => Err(PolynomialError::Other("Derivatives and integrals of rationals are not supported.".to_string())),
             Scale { scale, expression } => Ok(expression.deriv_integ_eval(wrt, values)? * *scale),
             DerivInteg {
                 expression,
@@ -472,7 +472,7 @@ impl<T: Copy> Expression<T> {
             Pow {
                 expression: _,
                 power: _,
-            } => todo!(),
+            } => Err(PolynomialError::Other("Derivatives and integrals of powers are not supported.".to_string())),
         }
     }
     #[inline]
@@ -724,7 +724,7 @@ where
             Expression::Div { num, denom } => format!("({}) / ({})", num, denom),
             Expression::Scale { scale, expression } => format!("{} * ({})", scale, expression),
             Expression::DerivInteg { expression, wrt } => {
-                format!("deriv({}, [{:?}])", expression, wrt)
+                format!("deriv({}, {:?})", expression, wrt)
             }
             Expression::Pow { expression, power } => format!("pow({}, {})", expression, power),
         };
