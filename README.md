@@ -6,7 +6,7 @@ Fast polynomial and rational evaluation for Python written in Rust.
 Quick example of computing a stiffness matrix:
 
 ``` python
-from rust_poly import FloatExpression as Polynomial, from_terms
+from rust_poly import ExpressionTree as Polynomial, from_terms
 import numpy as np
 
 terms = {"x1": 0, "x2": 1, "x1a": 2, "x2a": 3,

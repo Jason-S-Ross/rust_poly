@@ -17,6 +17,5 @@ dependencies = ["numpy"]
 authors = [
     {name = "Jason Ross"}
 ]
-
-[project.urls]
-repository = "github.com/Jason-S-Ross/rust_poly"
+repository = "https://github.com/Jason-S-Ross/rust_poly"
+keywords = ["numeric", "math", "polynomial"]
