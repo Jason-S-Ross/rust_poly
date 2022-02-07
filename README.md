@@ -6,21 +6,21 @@ Fast polynomial and rational evaluation for Python written in Rust.
 ## Usage
 ### Basics
 
-``` 
+``` python
 >>> from rust_poly import ExpressionTree
 
 ```
 
 
 We can construct a polynomial with the `ExpressionTree` constructor.
-```
+``` python
 >>> poly = ExpressionTree([1, 2, 3])
 >>> print(poly)
 1 + 2x₁¹ + 3x₁², dtype = i64
 
 ```
 `ExpressionTree` objects can be called on arrays and broadcast over the last dimension.
-```
+``` python
 >>> poly([2])
 array(17)
 
@@ -34,7 +34,7 @@ array([[ 6, 17],
 ```
 The last dimension of the argument must equal the dimension of the expression.
 
-```
+``` python
 >>> poly([1, 2, 3])
 Traceback (most recent call last):
 ...
@@ -44,7 +44,7 @@ ValueError: Incompatible shape for evaluation
 
 
 `ExpressionTree` objects can be composed and are lazily evaluated.
-```
+``` python
 >>> print(poly * poly)
 (1 + 2x₁¹ + 3x₁²) * (1 + 2x₁¹ + 3x₁²), dtype = i64
 >>> (poly * poly)([2])
@@ -52,14 +52,14 @@ array(289)
 
 ```
 `ExpressionTree` objects can be "expanded".
-```
+``` python
 >>> print((poly * poly).expand())
 1 + 4x₁¹ + 10x₁² + 12x₁³ + 9x₁⁴, dtype = i64
 
 ```
 `ExpressionTree` objects can be scaled, added, subtracted, divided, and multiplied lazily.
 
-``` 
+```  python
 >>> p1 = ExpressionTree([1, 2])
 >>> print(p1)
 1 + 2x₁¹, dtype = i64
@@ -81,7 +81,7 @@ array(289)
 
 Different data types (float, int, and complex) can be handled. 
 
-```
+``` python
 >>> poly([2.0])
 array(17.)
 
@@ -100,7 +100,7 @@ array(17.+0.j)
 
 Polynomials can be defined with many dimensions.
 
-``` 
+``` python 
 >>> p2d = ExpressionTree([[1, 2], [3, 4]])
 >>> print(p2d)
 1 + 2x₂¹ + 3x₁¹ + 4x₁¹x₂¹, dtype = i64
@@ -112,7 +112,7 @@ Polynomials can be defined with many dimensions.
 
 When evaluating higher dimension arrays, the last dimension of the expression to be evaluated must match the dimension of the array.
 
-```
+``` python
 >>> p2d([1, 2])
 array(16)
 >>> p2d([[1], [2]])
@@ -129,7 +129,7 @@ ValueError: Incompatible shape for evaluation
 
 Polynomial dimension must match for composition.
 
-``` 
+``` python
 >>> p2d + p1
 Traceback (most recent call last):
 ...
@@ -140,7 +140,7 @@ ValueError: Incompatible dimensions for composition
 ### Other operations 
 Differentiation and integration are supported. Integer polynomials are automatically converted to floats with this method.
 
-``` 
+``` python
 >>> print(p1.deriv([1]))
 deriv(1 + 2x₁¹, [1]), dtype = f64
 >>> print(p1.deriv([1]).expand())
@@ -162,7 +162,7 @@ deriv(3 + 4x₁¹ + 5x₁², [1]), dtype = f64
 ```
 The syntax for multi-dimensional derivatives and integrals is similar:
 
-```
+``` python
 >>> print(p2d.deriv([1, 0]).expand())
 3 + 4x₂¹, dtype = f64
 >>> print(p2d.deriv([0, 1]).expand())

@@ -1,0 +1,2 @@
+#!/bin/bash
+python -m doctest README.md && docker run --rm -v $(pwd):/io konstin2/maturin upload && twine upload --skip-existing target/wheels/*
